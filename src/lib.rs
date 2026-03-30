@@ -1,32 +1,107 @@
 //! # css-sanitizer
 //!
-//! A CSS sanitizer that filters untrusted CSS through an allowlist policy.
-//! Parse the input with lightningcss, keep only what you explicitly allow,
-//! strip everything else.
+//! Policy-driven CSS sanitization on top of `lightningcss`.
 //!
-//! ## Usage
+//! This crate exposes `lightningcss` and lets you sanitize parsed CSS AST nodes
+//! directly through [`CssSanitizationPolicy`]. There is no built-in safe preset:
+//! the safety properties come from the policy you implement.
+//!
+//! Default trait methods are fail-open and return
+//! [`NodeAction::Continue`]. A strict sanitizer must explicitly drop the rules,
+//! selectors, properties, and descriptors it does not want to keep.
+//!
+//! ## String API
 //!
 //! ```rust
-//! use css_sanitizer::Builder;
-//! use std::collections::{HashSet, HashMap};
+//! use css_sanitizer::{
+//!     clean_stylesheet_with_policy, CssSanitizationPolicy, NodeAction, PropertyContext,
+//!     RuleContext, RuleKind,
+//! };
 //!
-//! // Sanitize inline styles (declaration lists)
-//! let safe = Builder::new()
-//!     .add_allowed_properties(["color", "font-size", "display"])
-//!     .add_property_values("display", ["block", "inline", "flex", "none"])
-//!     .clean_declaration_list("color: red; position: fixed; display: flex");
-//! assert_eq!(safe, "color: red; display: flex");
+//! struct StyleColorOnly;
 //!
-//! // Sanitize full stylesheets
-//! let safe = Builder::new()
-//!     .add_allowed_properties(["color", "background-color"])
-//!     .add_allowed_at_rules(["media"])
-//!     .clean_stylesheet(".cls { color: red; position: fixed }");
-//! assert_eq!(safe, ".cls {\n  color: red;\n}\n");
+//! impl CssSanitizationPolicy for StyleColorOnly {
+//!     fn visit_rule(
+//!         &self,
+//!         _rule: &mut css_sanitizer::lightningcss::rules::CssRule<'_>,
+//!         ctx: RuleContext,
+//!     ) -> NodeAction {
+//!         match ctx.kind {
+//!             RuleKind::Style => NodeAction::Continue,
+//!             _ => NodeAction::Drop,
+//!         }
+//!     }
+//!
+//!     fn visit_property(
+//!         &self,
+//!         property: &mut css_sanitizer::lightningcss::properties::Property<'_>,
+//!         _ctx: PropertyContext,
+//!     ) -> NodeAction {
+//!         if property.property_id().name() == "color" {
+//!             NodeAction::Continue
+//!         } else {
+//!             NodeAction::Drop
+//!         }
+//!     }
+//! }
+//!
+//! let safe = clean_stylesheet_with_policy(
+//!     "@import url('evil.css'); .card { color: red; position: fixed }",
+//!     &StyleColorOnly,
+//! );
+//!
+//! assert!(!safe.contains("@import"));
+//! assert!(safe.contains("color"));
+//! assert!(!safe.contains("position"));
+//! ```
+//!
+//! ## AST API
+//!
+//! ```rust
+//! use css_sanitizer::{
+//!     sanitize_stylesheet_ast, CssSanitizationPolicy, NodeAction, RuleContext, RuleKind,
+//! };
+//! use css_sanitizer::lightningcss::stylesheet::{ParserOptions, StyleSheet};
+//!
+//! struct NoImports;
+//!
+//! impl CssSanitizationPolicy for NoImports {
+//!     fn visit_rule(
+//!         &self,
+//!         _rule: &mut css_sanitizer::lightningcss::rules::CssRule<'_>,
+//!         ctx: RuleContext,
+//!     ) -> NodeAction {
+//!         if ctx.kind == RuleKind::Import {
+//!             NodeAction::Drop
+//!         } else {
+//!             NodeAction::Continue
+//!         }
+//!     }
+//! }
+//!
+//! let mut stylesheet =
+//!     StyleSheet::parse("@import url('evil.css'); .card { color: blue }", ParserOptions::default())
+//!         .expect("stylesheet should parse");
+//!
+//! sanitize_stylesheet_ast(&mut stylesheet, &NoImports);
+//!
+//! let output = stylesheet
+//!     .to_css(Default::default())
+//!     .expect("stylesheet should serialize")
+//!     .code;
+//! assert!(!output.contains("@import"));
+//! assert!(output.contains(".card"));
 //! ```
 
-mod builder;
 mod policy;
 mod sanitize;
 
-pub use builder::Builder;
+pub use lightningcss;
+pub use policy::{
+    CssSanitizationPolicy, DeclarationOwner, DescriptorContext, DescriptorOwner, NodeAction,
+    PropertyContext, RuleContext, RuleKind, SelectorContext,
+};
+pub use sanitize::{
+    clean_declaration_list_with_policy, clean_stylesheet_with_policy,
+    sanitize_declaration_block_ast, sanitize_stylesheet_ast,
+};
