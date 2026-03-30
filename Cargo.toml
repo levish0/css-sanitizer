@@ -6,6 +6,7 @@ authors = ["Levi Laine <shiueo.csh@gmail.com>"]
 repository = "https://github.com/levish0/css-sanitizer"
 rust-version = "1.93.0"
 license = "Apache-2.0"
-description = "Sanitize and secure untrusted CSS "
+description = "Sanitize and secure untrusted CSS"
 
 [dependencies]
+lightningcss = "1.0.0-alpha.71"
