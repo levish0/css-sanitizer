@@ -7,6 +7,11 @@ repository = "https://github.com/levish0/css-sanitizer"
 rust-version = "1.93.0"
 license = "Apache-2.0"
 description = "Sanitize and secure untrusted CSS"
+keywords = ["css", "sanitizer", "security", "xss", "allowlist"]
+categories = ["web-programming", "parser-implementations"]
+
+[workspace]
+members = ["xtask"]
 
 [dependencies]
-lightningcss = "1.0.0-alpha.71"
+lightningcss = { version = "1.0.0-alpha.71", features = ["visitor"] }
