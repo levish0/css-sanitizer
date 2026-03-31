@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use css_sanitizer::lightningcss::rules::CssRule;
 use css_sanitizer::lightningcss::stylesheet::{ParserOptions, StyleSheet};
 use css_sanitizer::{rewrite_selector_classes, rewrite_stylesheet_selector_classes};
@@ -87,4 +89,112 @@ fn rewrite_selector_classes_can_operate_on_selector_list_directly() {
     assert!(output.contains(".smc-a1b2c3:hover"));
     assert!(output.contains(".info"));
     assert!(!output.contains(".notice"));
+}
+
+#[test]
+fn rewrite_stylesheet_selector_classes_updates_shadow_dom_selector_functions() {
+    let mut stylesheet =
+        parse_stylesheet(":host(.notice), :host, ::slotted(.notice) { color: red }");
+
+    rewrite_stylesheet_selector_classes(&mut stylesheet, |name| {
+        (name == "notice").then(|| "smc-shadow".to_string())
+    });
+
+    let output = serialize_stylesheet(&stylesheet);
+    assert!(output.contains(":host(.smc-shadow)"));
+    assert!(output.contains("::slotted(.smc-shadow)"));
+    assert!(output.contains(":host,"));
+    assert!(!output.contains(".notice"));
+}
+
+#[test]
+fn rewrite_stylesheet_selector_classes_recurses_through_wrapper_rules() {
+    let mut stylesheet = parse_stylesheet(
+        r#"
+        @media (min-width: 10px) {
+            .media-target { color: red; }
+        }
+        @supports (display: grid) {
+            .supports-target { color: red; }
+        }
+        @container card (min-width: 10px) {
+            .container-target { color: red; }
+        }
+        @layer demo {
+            .layer-target { color: red; }
+        }
+        @starting-style {
+            .start-target { color: red; }
+        }
+        @scope (.scope-root) to (.scope-end) {
+            .scope-target { color: red; }
+        }
+        "#,
+    );
+
+    let mut seen = Vec::new();
+    rewrite_stylesheet_selector_classes(&mut stylesheet, |name| {
+        seen.push(name.to_string());
+        Some(format!("smc-{name}"))
+    });
+
+    let output = serialize_stylesheet(&stylesheet);
+    for original in [
+        "media-target",
+        "supports-target",
+        "container-target",
+        "layer-target",
+        "start-target",
+        "scope-root",
+        "scope-end",
+        "scope-target",
+    ] {
+        assert!(!output.contains(&format!(".{original}")));
+        assert!(output.contains(&format!(".smc-{original}")));
+    }
+
+    let seen = seen.into_iter().collect::<BTreeSet<_>>();
+    let expected = [
+        "container-target",
+        "layer-target",
+        "media-target",
+        "scope-end",
+        "scope-root",
+        "scope-target",
+        "start-target",
+        "supports-target",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect::<BTreeSet<_>>();
+    assert_eq!(seen, expected);
+}
+
+#[test]
+fn rewrite_selector_classes_visits_nested_classes_in_direct_api() {
+    let mut stylesheet = parse_stylesheet(
+        ":host(.hosted), ::slotted(.slot), .card:is(.notice, .info):where(.notice):not(.warning):has(.notice):nth-child(2n of .notice) { color: red }",
+    );
+    let CssRule::Style(style_rule) = &mut stylesheet.rules.0[0] else {
+        panic!("expected a style rule");
+    };
+
+    let mut seen = Vec::new();
+    rewrite_selector_classes(&mut style_rule.selectors, |name| {
+        seen.push(name.to_string());
+        Some(format!("smc-{name}"))
+    });
+
+    let output = serialize_stylesheet(&stylesheet);
+    for original in ["card", "hosted", "slot", "notice", "info", "warning"] {
+        assert!(!output.contains(&format!(".{original}")));
+        assert!(output.contains(&format!(".smc-{original}")));
+    }
+
+    let seen = seen.into_iter().collect::<BTreeSet<_>>();
+    let expected = ["card", "hosted", "slot", "notice", "info", "warning"]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(seen, expected);
 }
