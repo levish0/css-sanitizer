@@ -8,13 +8,13 @@ use css_sanitizer::lightningcss::rules::font_face::FontFaceProperty;
 use css_sanitizer::lightningcss::rules::CssRule;
 use css_sanitizer::{
     CssSanitizationPolicy, DescriptorContext, NodeAction, PropertyContext, RuleContext,
-    RuleKind, SelectorContext,
+    SelectorContext,
 };
 
 #[derive(Default)]
 pub struct StrictPolicy {
     allowed_properties: HashSet<&'static str>,
-    allowed_rules: Vec<RuleKind>,
+    allowed_rules: HashSet<&'static str>,
     allowed_values: HashMap<&'static str, HashSet<String>>,
     allow_important: bool,
     allow_url: bool,
@@ -31,7 +31,7 @@ impl StrictPolicy {
         self
     }
 
-    pub fn allow_rules(mut self, rules: &[RuleKind]) -> Self {
+    pub fn allow_rules(mut self, rules: &[&'static str]) -> Self {
         self.allowed_rules.extend(rules.iter().copied());
         self
     }
@@ -75,17 +75,46 @@ impl StrictPolicy {
         Some(value.to_string())
     }
 
-    fn rule_allowed(&self, kind: RuleKind) -> bool {
-        matches!(
-            kind,
-            RuleKind::Style | RuleKind::Nesting | RuleKind::NestedDeclarations
-        ) || self.allowed_rules.contains(&kind)
+    fn rule_name(rule: &CssRule<'_>) -> &'static str {
+        match rule {
+            CssRule::Media(_) => "media",
+            CssRule::Import(_) => "import",
+            CssRule::Style(_) => "style",
+            CssRule::Keyframes(_) => "keyframes",
+            CssRule::FontFace(_) => "font-face",
+            CssRule::FontPaletteValues(_) => "font-palette-values",
+            CssRule::FontFeatureValues(_) => "font-feature-values",
+            CssRule::Page(_) => "page",
+            CssRule::Supports(_) => "supports",
+            CssRule::CounterStyle(_) => "counter-style",
+            CssRule::Namespace(_) => "namespace",
+            CssRule::MozDocument(_) => "moz-document",
+            CssRule::Nesting(_) => "nesting",
+            CssRule::NestedDeclarations(_) => "nested-declarations",
+            CssRule::Viewport(_) => "viewport",
+            CssRule::CustomMedia(_) => "custom-media",
+            CssRule::LayerStatement(_) => "layer-statement",
+            CssRule::LayerBlock(_) => "layer-block",
+            CssRule::Property(_) => "property",
+            CssRule::Container(_) => "container",
+            CssRule::Scope(_) => "scope",
+            CssRule::StartingStyle(_) => "starting-style",
+            CssRule::ViewTransition(_) => "view-transition",
+            CssRule::Ignored => "ignored",
+            CssRule::Unknown(_) => "unknown",
+            CssRule::Custom(_) => "custom",
+        }
+    }
+
+    fn rule_allowed(&self, rule: &CssRule<'_>) -> bool {
+        matches!(rule, CssRule::Style(_) | CssRule::Nesting(_) | CssRule::NestedDeclarations(_))
+            || self.allowed_rules.contains(Self::rule_name(rule))
     }
 }
 
 impl CssSanitizationPolicy for StrictPolicy {
-    fn visit_rule(&self, _rule: &mut CssRule<'_>, ctx: RuleContext) -> NodeAction {
-        if self.rule_allowed(ctx.kind) {
+    fn visit_rule(&self, rule: &mut CssRule<'_>, _ctx: RuleContext) -> NodeAction {
+        if self.rule_allowed(rule) {
             NodeAction::Continue
         } else {
             NodeAction::Drop

@@ -15,19 +15,20 @@
 //! ```rust
 //! use css_sanitizer::{
 //!     clean_stylesheet_with_policy, CssSanitizationPolicy, NodeAction, PropertyContext,
-//!     RuleContext, RuleKind,
+//!     RuleContext,
 //! };
+//! use css_sanitizer::lightningcss::rules::CssRule;
 //!
 //! struct StyleColorOnly;
 //!
 //! impl CssSanitizationPolicy for StyleColorOnly {
 //!     fn visit_rule(
 //!         &self,
-//!         _rule: &mut css_sanitizer::lightningcss::rules::CssRule<'_>,
-//!         ctx: RuleContext,
+//!         rule: &mut CssRule<'_>,
+//!         _ctx: RuleContext,
 //!     ) -> NodeAction {
-//!         match ctx.kind {
-//!             RuleKind::Style => NodeAction::Continue,
+//!         match rule {
+//!             CssRule::Style(_) => NodeAction::Continue,
 //!             _ => NodeAction::Drop,
 //!         }
 //!     }
@@ -59,8 +60,9 @@
 //!
 //! ```rust
 //! use css_sanitizer::{
-//!     sanitize_stylesheet_ast, CssSanitizationPolicy, NodeAction, RuleContext, RuleKind,
+//!     sanitize_stylesheet_ast, CssSanitizationPolicy, NodeAction, RuleContext,
 //! };
+//! use css_sanitizer::lightningcss::rules::CssRule;
 //! use css_sanitizer::lightningcss::stylesheet::{ParserOptions, StyleSheet};
 //!
 //! struct NoImports;
@@ -68,10 +70,10 @@
 //! impl CssSanitizationPolicy for NoImports {
 //!     fn visit_rule(
 //!         &self,
-//!         _rule: &mut css_sanitizer::lightningcss::rules::CssRule<'_>,
-//!         ctx: RuleContext,
+//!         rule: &mut CssRule<'_>,
+//!         _ctx: RuleContext,
 //!     ) -> NodeAction {
-//!         if ctx.kind == RuleKind::Import {
+//!         if matches!(rule, CssRule::Import(_)) {
 //!             NodeAction::Drop
 //!         } else {
 //!             NodeAction::Continue
@@ -98,8 +100,8 @@ mod sanitize;
 
 pub use lightningcss;
 pub use policy::{
-    CssSanitizationPolicy, DeclarationOwner, DescriptorContext, DescriptorOwner, NodeAction,
-    PropertyContext, RuleContext, RuleKind, SelectorContext,
+    CssSanitizationPolicy, DescriptorContext, NodeAction, PropertyContext, RuleContext,
+    SelectorContext,
 };
 pub use sanitize::{
     clean_declaration_list_with_policy, clean_stylesheet_with_policy,

@@ -20,80 +20,21 @@ pub enum NodeAction {
     Drop,
 }
 
-/// High-level kinds of CSS rules exposed by lightningcss.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RuleKind {
-    Stylesheet,
-    Media,
-    Import,
-    Style,
-    Keyframes,
-    FontFace,
-    FontPaletteValues,
-    FontFeatureValues,
-    Page,
-    PageMargin,
-    Supports,
-    CounterStyle,
-    Namespace,
-    MozDocument,
-    Nesting,
-    NestedDeclarations,
-    Viewport,
-    CustomMedia,
-    LayerStatement,
-    LayerBlock,
-    Property,
-    Container,
-    Scope,
-    StartingStyle,
-    ViewTransition,
-    Ignored,
-    Unknown,
-    Custom,
-}
-
-/// Where a normal CSS declaration/property is being sanitized.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeclarationOwner {
-    DeclarationList,
-    StyleRule,
-    NestedDeclarations,
-    Keyframe,
-    Page,
-    PageMargin,
-    CounterStyle,
-    Viewport,
-}
-
-/// Where a descriptor-style property is being sanitized.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DescriptorOwner {
-    FontFace,
-    FontPaletteValues,
-    ViewTransition,
-}
-
 /// Context for a CSS rule node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuleContext {
-    pub kind: RuleKind,
-    pub parent: Option<RuleKind>,
     pub depth: usize,
 }
 
 /// Context for a selector list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SelectorContext {
-    pub parent_rule: RuleKind,
     pub depth: usize,
 }
 
 /// Context for a normal CSS property.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PropertyContext {
-    pub owner: DeclarationOwner,
-    pub parent_rule: Option<RuleKind>,
     pub depth: usize,
     pub important: bool,
 }
@@ -102,8 +43,6 @@ pub struct PropertyContext {
 /// [`Property`](lightningcss::properties::Property).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DescriptorContext {
-    pub owner: DescriptorOwner,
-    pub parent_rule: Option<RuleKind>,
     pub depth: usize,
 }
 
@@ -119,7 +58,8 @@ pub trait CssSanitizationPolicy {
         NodeAction::Continue
     }
 
-    /// Called for selector lists on style-like rules.
+    /// Called for all selector lists unless a more specific selector hook is
+    /// overridden.
     fn visit_selector_list(
         &self,
         _selectors: &mut SelectorList<'_>,
@@ -128,10 +68,101 @@ pub trait CssSanitizationPolicy {
         NodeAction::Continue
     }
 
-    /// Called for normal CSS declarations represented as
-    /// [`Property`](lightningcss::properties::Property).
+    /// Called for selectors on normal style rules.
+    fn visit_style_rule_selectors(
+        &self,
+        selectors: &mut SelectorList<'_>,
+        ctx: SelectorContext,
+    ) -> NodeAction {
+        self.visit_selector_list(selectors, ctx)
+    }
+
+    /// Called for selectors on nesting rules.
+    fn visit_nesting_selectors(
+        &self,
+        selectors: &mut SelectorList<'_>,
+        ctx: SelectorContext,
+    ) -> NodeAction {
+        self.visit_selector_list(selectors, ctx)
+    }
+
+    /// Called for all normal CSS declarations represented as
+    /// [`Property`](lightningcss::properties::Property) unless a more specific
+    /// property hook is overridden.
     fn visit_property(&self, _property: &mut Property<'_>, _ctx: PropertyContext) -> NodeAction {
         NodeAction::Continue
+    }
+
+    /// Called for parsed declaration lists such as `style=""` content.
+    fn visit_declaration_list_property(
+        &self,
+        property: &mut Property<'_>,
+        ctx: PropertyContext,
+    ) -> NodeAction {
+        self.visit_property(property, ctx)
+    }
+
+    /// Called for declarations inside normal style rules.
+    fn visit_style_property(
+        &self,
+        property: &mut Property<'_>,
+        ctx: PropertyContext,
+    ) -> NodeAction {
+        self.visit_property(property, ctx)
+    }
+
+    /// Called for declarations inside nested declarations rules.
+    fn visit_nested_declarations_property(
+        &self,
+        property: &mut Property<'_>,
+        ctx: PropertyContext,
+    ) -> NodeAction {
+        self.visit_property(property, ctx)
+    }
+
+    /// Called for declarations inside keyframes.
+    fn visit_keyframe_property(
+        &self,
+        property: &mut Property<'_>,
+        ctx: PropertyContext,
+    ) -> NodeAction {
+        self.visit_property(property, ctx)
+    }
+
+    /// Called for declarations inside `@page`.
+    fn visit_page_property(
+        &self,
+        property: &mut Property<'_>,
+        ctx: PropertyContext,
+    ) -> NodeAction {
+        self.visit_property(property, ctx)
+    }
+
+    /// Called for declarations inside page margin rules.
+    fn visit_page_margin_property(
+        &self,
+        property: &mut Property<'_>,
+        ctx: PropertyContext,
+    ) -> NodeAction {
+        self.visit_property(property, ctx)
+    }
+
+    /// Called for declarations inside `@counter-style`.
+    fn visit_counter_style_property(
+        &self,
+        property: &mut Property<'_>,
+        ctx: PropertyContext,
+    ) -> NodeAction {
+        self.visit_property(property, ctx)
+    }
+
+    /// Called for declarations inside `@viewport`.
+    fn visit_viewport_property(
+        &self,
+        property: &mut Property<'_>,
+        ctx: PropertyContext,
+    ) -> NodeAction {
+        self.visit_property(property, ctx)
     }
 
     /// Called for `@font-face` descriptors.
@@ -190,9 +221,6 @@ pub trait CssSanitizationPolicy {
     }
 
     /// Called for `@font-feature-values` rules.
-    ///
-    /// These rules have their own internal structure in lightningcss, so the
-    /// advanced hook gets access to the full AST node directly.
     fn visit_font_feature_values_rule(
         &self,
         _rule: &mut FontFeatureValuesRule<'_>,

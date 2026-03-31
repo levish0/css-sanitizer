@@ -13,6 +13,12 @@ not a built-in preset sanitizer.
 css-sanitizer = "0.1"
 ```
 
+## Example
+
+```bash
+cargo run --example sanitize_strings
+```
+
 ## Core model
 
 - `CssSanitizationPolicy` is the main extension point.
@@ -28,19 +34,20 @@ explicitly return `NodeAction::Drop` for anything you do not want to keep.
 ```rust
 use css_sanitizer::{
     clean_stylesheet_with_policy, CssSanitizationPolicy, NodeAction, PropertyContext,
-    RuleContext, RuleKind,
+    RuleContext,
 };
+use css_sanitizer::lightningcss::rules::CssRule;
 
 struct StyleColorOnly;
 
 impl CssSanitizationPolicy for StyleColorOnly {
     fn visit_rule(
         &self,
-        _rule: &mut css_sanitizer::lightningcss::rules::CssRule<'_>,
-        ctx: RuleContext,
+        rule: &mut CssRule<'_>,
+        _ctx: RuleContext,
     ) -> NodeAction {
-        match ctx.kind {
-            RuleKind::Style => NodeAction::Continue,
+        match rule {
+            CssRule::Style(_) => NodeAction::Continue,
             _ => NodeAction::Drop,
         }
     }
@@ -72,8 +79,9 @@ assert!(!safe.contains("position"));
 
 ```rust
 use css_sanitizer::{
-    sanitize_stylesheet_ast, CssSanitizationPolicy, NodeAction, RuleContext, RuleKind,
+    sanitize_stylesheet_ast, CssSanitizationPolicy, NodeAction, RuleContext,
 };
+use css_sanitizer::lightningcss::rules::CssRule;
 use css_sanitizer::lightningcss::stylesheet::{ParserOptions, StyleSheet};
 
 struct NoImports;
@@ -81,10 +89,10 @@ struct NoImports;
 impl CssSanitizationPolicy for NoImports {
     fn visit_rule(
         &self,
-        _rule: &mut css_sanitizer::lightningcss::rules::CssRule<'_>,
-        ctx: RuleContext,
+        rule: &mut CssRule<'_>,
+        _ctx: RuleContext,
     ) -> NodeAction {
-        if ctx.kind == RuleKind::Import {
+        if matches!(rule, CssRule::Import(_)) {
             NodeAction::Drop
         } else {
             NodeAction::Continue
@@ -130,7 +138,6 @@ Empty rules created by filtering are removed during traversal.
 
 - `CssSanitizationPolicy`
 - `NodeAction`
-- `RuleKind`
 - `RuleContext`
 - `SelectorContext`
 - `PropertyContext`
