@@ -10,13 +10,14 @@ not a built-in preset sanitizer.
 
 ```toml
 [dependencies]
-css-sanitizer = "0.1.2"
+css-sanitizer = "0.1.3"
 ```
 
 ## Example
 
 ```bash
 cargo run --example sanitize_strings
+cargo run --example rewrite_classes
 ```
 
 ## Core model
@@ -24,6 +25,7 @@ cargo run --example sanitize_strings
 - `CssSanitizationPolicy` is the main extension point.
 - `clean_declaration_list_with_policy()` and `clean_stylesheet_with_policy()` parse, sanitize, and serialize strings.
 - `sanitize_declaration_block_ast()` and `sanitize_stylesheet_ast()` mutate parsed `lightningcss` ASTs in place.
+- `rewrite_selector_classes()` and `rewrite_stylesheet_selector_classes()` rewrite class selectors in parsed ASTs.
 - `lightningcss` is re-exported so callers can work against the same AST types.
 
 Default trait methods are fail-open. If you want a strict sanitizer, your policy must
@@ -145,6 +147,8 @@ Empty rules created by filtering are removed during traversal.
 - `DescriptorContext`
 - `sanitize_declaration_block_ast()`
 - `sanitize_stylesheet_ast()`
+- `rewrite_selector_classes()`
+- `rewrite_stylesheet_selector_classes()`
 - `clean_declaration_list_with_policy()`
 - `clean_stylesheet_with_policy()`
 - `pub use lightningcss`

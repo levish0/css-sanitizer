@@ -5,6 +5,16 @@ All notable changes to css-sanitizer will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.1.3] - 2026-03-31
+
+### Added
+
+- Added `rewrite_selector_classes()` and `rewrite_stylesheet_selector_classes()` to rewrite class selectors in parsed selector lists and stylesheets.
+- Added regression coverage for class selector rewriting across nested selector functions, `:nth-child(... of S)`, nesting rules, and `@scope` selectors.
+- Added a `rewrite_classes` example that demonstrates stylesheet-wide and selector-list class rewriting.
+
 ## [0.1.2] - 2026-03-31
 
 ### Added

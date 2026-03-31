@@ -96,6 +96,7 @@
 //! ```
 
 mod policy;
+mod rewrite;
 mod sanitize;
 
 pub use lightningcss;
@@ -103,6 +104,7 @@ pub use policy::{
     CssSanitizationPolicy, DescriptorContext, NodeAction, PropertyContext, RuleContext,
     SelectorContext,
 };
+pub use rewrite::{rewrite_selector_classes, rewrite_stylesheet_selector_classes};
 pub use sanitize::{
     clean_declaration_list_with_policy, clean_stylesheet_with_policy,
     sanitize_declaration_block_ast, sanitize_stylesheet_ast,

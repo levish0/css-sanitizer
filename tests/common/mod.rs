@@ -226,14 +226,13 @@ impl CssSanitizationPolicy for StrictPolicy {
             return NodeAction::Drop;
         }
 
-        if let Some(allowed_values) = self.allowed_values.get(name) {
-            if !allowed_values
+        if let Some(allowed_values) = self.allowed_values.get(name)
+            && !allowed_values
                 .iter()
                 .copied()
                 .any(|allowed_value| Self::matches_allowed_value(property, allowed_value))
-            {
-                return NodeAction::Drop;
-            }
+        {
+            return NodeAction::Drop;
         }
 
         NodeAction::Continue
