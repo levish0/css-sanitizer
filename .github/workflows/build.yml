@@ -23,3 +23,5 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-targets
 
+      - name: Benchmark Smoke Test
+        run: cargo test --workspace --benches
