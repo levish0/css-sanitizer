@@ -4,11 +4,12 @@ use crate::policy::{
 };
 use lightningcss::declaration::DeclarationBlock;
 use lightningcss::printer::{Printer, PrinterOptions};
+use lightningcss::rules::CssRule;
 use lightningcss::rules::font_face::FontFaceProperty;
+use lightningcss::rules::font_feature_values::FontFeatureValuesRule;
 use lightningcss::rules::font_palette_values::FontPaletteValuesProperty;
 use lightningcss::rules::page::PageMarginRule;
 use lightningcss::rules::view_transition::ViewTransitionProperty;
-use lightningcss::rules::CssRule;
 use lightningcss::selector::SelectorList;
 use lightningcss::stylesheet::{ParserOptions, StyleSheet};
 use lightningcss::traits::ToCss;
@@ -31,11 +32,11 @@ enum PropertyLocation {
     Viewport,
 }
 
-fn serialize_declaration_block(block: &DeclarationBlock<'_>) -> String {
+fn serialize_declaration_block(block: &DeclarationBlock<'_>) -> Option<String> {
     let mut output = String::new();
     let mut printer = Printer::new(&mut output, PrinterOptions::default());
-    let _ = block.to_css(&mut printer);
-    output
+    block.to_css(&mut printer).ok()?;
+    Some(output)
 }
 
 fn sanitize_selector_list(
@@ -63,31 +64,25 @@ fn sanitize_property_vec(
     depth: usize,
     important: bool,
 ) {
-    let mut filtered = Vec::with_capacity(properties.len());
-    for mut property in std::mem::take(properties) {
+    properties.retain_mut(|property| {
         let ctx = PropertyContext { depth, important };
         let action = match location {
             PropertyLocation::DeclarationList => {
-                policy.visit_declaration_list_property(&mut property, ctx)
+                policy.visit_declaration_list_property(property, ctx)
             }
-            PropertyLocation::StyleRule => policy.visit_style_property(&mut property, ctx),
+            PropertyLocation::StyleRule => policy.visit_style_property(property, ctx),
             PropertyLocation::NestedDeclarations => {
-                policy.visit_nested_declarations_property(&mut property, ctx)
+                policy.visit_nested_declarations_property(property, ctx)
             }
-            PropertyLocation::Keyframe => policy.visit_keyframe_property(&mut property, ctx),
-            PropertyLocation::Page => policy.visit_page_property(&mut property, ctx),
-            PropertyLocation::PageMargin => policy.visit_page_margin_property(&mut property, ctx),
-            PropertyLocation::CounterStyle => {
-                policy.visit_counter_style_property(&mut property, ctx)
-            }
-            PropertyLocation::Viewport => policy.visit_viewport_property(&mut property, ctx),
+            PropertyLocation::Keyframe => policy.visit_keyframe_property(property, ctx),
+            PropertyLocation::Page => policy.visit_page_property(property, ctx),
+            PropertyLocation::PageMargin => policy.visit_page_margin_property(property, ctx),
+            PropertyLocation::CounterStyle => policy.visit_counter_style_property(property, ctx),
+            PropertyLocation::Viewport => policy.visit_viewport_property(property, ctx),
         };
 
-        if !matches!(action, NodeAction::Drop) {
-            filtered.push(property);
-        }
-    }
-    *properties = filtered;
+        !matches!(action, NodeAction::Drop)
+    });
 }
 
 fn sanitize_declaration_block_inner(
@@ -111,18 +106,10 @@ fn sanitize_font_face_properties(
     policy: &dyn CssSanitizationPolicy,
     depth: usize,
 ) {
-    let mut filtered = Vec::with_capacity(properties.len());
-    for mut property in std::mem::take(properties) {
-        let action = policy.visit_font_face_property(
-            &mut property,
-            DescriptorContext { depth },
-        );
-
-        if !matches!(action, NodeAction::Drop) {
-            filtered.push(property);
-        }
-    }
-    *properties = filtered;
+    properties.retain_mut(|property| {
+        let action = policy.visit_font_face_property(property, DescriptorContext { depth });
+        !matches!(action, NodeAction::Drop)
+    });
 }
 
 fn sanitize_font_palette_values_properties(
@@ -130,18 +117,11 @@ fn sanitize_font_palette_values_properties(
     policy: &dyn CssSanitizationPolicy,
     depth: usize,
 ) {
-    let mut filtered = Vec::with_capacity(properties.len());
-    for mut property in std::mem::take(properties) {
-        let action = policy.visit_font_palette_values_property(
-            &mut property,
-            DescriptorContext { depth },
-        );
-
-        if !matches!(action, NodeAction::Drop) {
-            filtered.push(property);
-        }
-    }
-    *properties = filtered;
+    properties.retain_mut(|property| {
+        let action =
+            policy.visit_font_palette_values_property(property, DescriptorContext { depth });
+        !matches!(action, NodeAction::Drop)
+    });
 }
 
 fn sanitize_view_transition_properties(
@@ -149,18 +129,24 @@ fn sanitize_view_transition_properties(
     policy: &dyn CssSanitizationPolicy,
     depth: usize,
 ) {
-    let mut filtered = Vec::with_capacity(properties.len());
-    for mut property in std::mem::take(properties) {
-        let action = policy.visit_view_transition_property(
-            &mut property,
-            DescriptorContext { depth },
-        );
+    properties.retain_mut(|property| {
+        let action = policy.visit_view_transition_property(property, DescriptorContext { depth });
+        !matches!(action, NodeAction::Drop)
+    });
+}
 
-        if !matches!(action, NodeAction::Drop) {
-            filtered.push(property);
+fn sanitize_font_feature_values_subrules(
+    rule: &mut FontFeatureValuesRule<'_>,
+    policy: &dyn CssSanitizationPolicy,
+    depth: usize,
+) {
+    rule.rules.retain(|_, subrule| {
+        let ctx = RuleContext { depth };
+        match policy.visit_font_feature_values_subrule(subrule, ctx) {
+            NodeAction::Drop => false,
+            NodeAction::Skip | NodeAction::Continue => !subrule.declarations.is_empty(),
         }
-    }
-    *properties = filtered;
+    });
 }
 
 fn sanitize_page_margin_rules(
@@ -168,19 +154,12 @@ fn sanitize_page_margin_rules(
     policy: &dyn CssSanitizationPolicy,
     depth: usize,
 ) {
-    let mut filtered = Vec::with_capacity(rules.len());
-    for mut rule in std::mem::take(rules) {
-        let ctx = RuleContext {
-            depth,
-        };
+    rules.retain_mut(|rule| {
+        let ctx = RuleContext { depth };
 
-        match policy.visit_page_margin_rule(&mut rule, ctx) {
-            NodeAction::Drop => {}
-            NodeAction::Skip => {
-                if !rule.declarations.is_empty() {
-                    filtered.push(rule);
-                }
-            }
+        match policy.visit_page_margin_rule(rule, ctx) {
+            NodeAction::Drop => false,
+            NodeAction::Skip => !rule.declarations.is_empty(),
             NodeAction::Continue => {
                 sanitize_declaration_block_inner(
                     &mut rule.declarations,
@@ -189,14 +168,10 @@ fn sanitize_page_margin_rules(
                     depth + 1,
                 );
 
-                if !rule.declarations.is_empty() {
-                    filtered.push(rule);
-                }
+                !rule.declarations.is_empty()
             }
         }
-    }
-
-    *rules = filtered;
+    });
 }
 
 fn is_rule_empty(rule: &CssRule<'_>) -> bool {
@@ -240,8 +215,7 @@ fn sanitize_rule_contents(
                 policy,
                 SelectorLocation::StyleRule,
                 ctx.depth + 1,
-            )
-            {
+            ) {
                 return false;
             }
 
@@ -265,7 +239,8 @@ fn sanitize_rule_contents(
                     ctx.depth + 1,
                 );
             }
-            rule.keyframes.retain(|keyframe| !keyframe.declarations.is_empty());
+            rule.keyframes
+                .retain(|keyframe| !keyframe.declarations.is_empty());
         }
         CssRule::FontFace(rule) => {
             sanitize_font_face_properties(&mut rule.properties, policy, ctx.depth + 1);
@@ -276,7 +251,10 @@ fn sanitize_rule_contents(
         CssRule::FontFeatureValues(rule) => {
             match policy.visit_font_feature_values_rule(rule, ctx) {
                 NodeAction::Drop => return false,
-                NodeAction::Skip | NodeAction::Continue => {}
+                NodeAction::Skip => {}
+                NodeAction::Continue => {
+                    sanitize_font_feature_values_subrules(rule, policy, ctx.depth + 1);
+                }
             }
         }
         CssRule::Page(rule) => match policy.visit_page_rule(rule, ctx) {
@@ -293,11 +271,7 @@ fn sanitize_rule_contents(
             }
         },
         CssRule::Supports(rule) => {
-            sanitize_rule_list(
-                &mut rule.rules.0,
-                policy,
-                ctx.depth + 1,
-            );
+            sanitize_rule_list(&mut rule.rules.0, policy, ctx.depth + 1);
         }
         CssRule::CounterStyle(rule) => match policy.visit_counter_style_rule(rule, ctx) {
             NodeAction::Drop => return false,
@@ -324,11 +298,7 @@ fn sanitize_rule_contents(
                 return false;
             }
 
-            sanitize_rule_list(
-                &mut rule.style.rules.0,
-                policy,
-                ctx.depth + 1,
-            );
+            sanitize_rule_list(&mut rule.style.rules.0, policy, ctx.depth + 1);
             sanitize_declaration_block_inner(
                 &mut rule.style.declarations,
                 policy,
@@ -383,27 +353,17 @@ fn sanitize_rule_list(
     policy: &dyn CssSanitizationPolicy,
     depth: usize,
 ) {
-    let mut filtered = Vec::with_capacity(rules.len());
-
-    for mut rule in std::mem::take(rules) {
+    rules.retain_mut(|rule| {
         let ctx = RuleContext { depth };
 
-        match policy.visit_rule(&mut rule, ctx) {
-            NodeAction::Drop => {}
-            NodeAction::Skip => {
-                if !is_rule_empty(&rule) {
-                    filtered.push(rule);
-                }
-            }
+        match policy.visit_rule(rule, ctx) {
+            NodeAction::Drop => false,
+            NodeAction::Skip => !is_rule_empty(rule),
             NodeAction::Continue => {
-                if sanitize_rule_contents(&mut rule, policy, ctx) && !is_rule_empty(&rule) {
-                    filtered.push(rule);
-                }
+                sanitize_rule_contents(rule, policy, ctx) && !is_rule_empty(rule)
             }
         }
-    }
-
-    *rules = filtered;
+    });
 }
 
 /// Sanitizes a parsed declaration block in place.
@@ -442,7 +402,7 @@ pub fn clean_declaration_list_with_policy(
         return String::new();
     }
 
-    serialize_declaration_block(&block)
+    serialize_declaration_block(&block).unwrap_or_default()
 }
 
 /// Parses and sanitizes a full stylesheet with a custom AST policy.

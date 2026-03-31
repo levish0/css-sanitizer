@@ -10,7 +10,7 @@ not a built-in preset sanitizer.
 
 ```toml
 [dependencies]
-css-sanitizer = "0.1"
+css-sanitizer = "0.1.1"
 ```
 
 ## Example
@@ -125,6 +125,7 @@ The built-in walker already handles:
 - `@keyframes`
 - `@font-face`
 - `@font-palette-values`
+- `@font-feature-values` and its sub-rules
 - `@page` and page margin rules
 - `@counter-style`
 - `@viewport`

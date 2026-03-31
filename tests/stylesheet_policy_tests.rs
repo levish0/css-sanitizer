@@ -46,9 +46,7 @@ fn stylesheet_blocks_import_by_default() {
 fn stylesheet_allows_import_only_with_rule_and_url() {
     let result = clean_stylesheet_with_policy(
         "@import url('https://example.com/style.css');",
-        &StrictPolicy::new()
-            .allow_rules(&["import"])
-            .allow_url(),
+        &StrictPolicy::new().allow_rules(&["import"]).allow_url(),
     );
     assert!(result.contains("@import"));
 }

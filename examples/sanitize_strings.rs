@@ -1,8 +1,8 @@
 use css_sanitizer::lightningcss::properties::Property;
 use css_sanitizer::lightningcss::rules::CssRule;
 use css_sanitizer::{
-    clean_declaration_list_with_policy, clean_stylesheet_with_policy, CssSanitizationPolicy,
-    NodeAction, PropertyContext, RuleContext,
+    CssSanitizationPolicy, NodeAction, PropertyContext, RuleContext,
+    clean_declaration_list_with_policy, clean_stylesheet_with_policy,
 };
 
 struct DemoPolicy;

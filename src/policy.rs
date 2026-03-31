@@ -1,12 +1,12 @@
 use lightningcss::properties::Property;
+use lightningcss::rules::CssRule;
 use lightningcss::rules::counter_style::CounterStyleRule;
 use lightningcss::rules::font_face::FontFaceProperty;
-use lightningcss::rules::font_feature_values::FontFeatureValuesRule;
+use lightningcss::rules::font_feature_values::{FontFeatureSubrule, FontFeatureValuesRule};
 use lightningcss::rules::font_palette_values::FontPaletteValuesProperty;
 use lightningcss::rules::page::{PageMarginRule, PageRule};
 use lightningcss::rules::view_transition::ViewTransitionProperty;
 use lightningcss::rules::viewport::ViewportRule;
-use lightningcss::rules::CssRule;
 use lightningcss::selector::SelectorList;
 
 /// Controls how the sanitizer should handle the current node.
@@ -130,11 +130,7 @@ pub trait CssSanitizationPolicy {
     }
 
     /// Called for declarations inside `@page`.
-    fn visit_page_property(
-        &self,
-        property: &mut Property<'_>,
-        ctx: PropertyContext,
-    ) -> NodeAction {
+    fn visit_page_property(&self, property: &mut Property<'_>, ctx: PropertyContext) -> NodeAction {
         self.visit_property(property, ctx)
     }
 
@@ -224,6 +220,15 @@ pub trait CssSanitizationPolicy {
     fn visit_font_feature_values_rule(
         &self,
         _rule: &mut FontFeatureValuesRule<'_>,
+        _ctx: RuleContext,
+    ) -> NodeAction {
+        NodeAction::Continue
+    }
+
+    /// Called for sub-rules nested inside `@font-feature-values`.
+    fn visit_font_feature_values_subrule(
+        &self,
+        _subrule: &mut FontFeatureSubrule<'_>,
         _ctx: RuleContext,
     ) -> NodeAction {
         NodeAction::Continue

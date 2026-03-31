@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-03-31
+
+### Added
+
+- Added `visit_font_feature_values_subrule()` so policies can filter `@font-feature-values` sub-rules directly.
+- Added regression coverage for `@font-feature-values` sub-rule filtering and empty-rule pruning.
+
+### Changed
+
+- Sanitization now walks `@font-feature-values` sub-rules when `visit_font_feature_values_rule()` returns `NodeAction::Continue`.
+- `clean_declaration_list_with_policy()` now returns an empty string when declaration serialization fails, matching stylesheet sanitization behavior.
+- Internal filtering now uses in-place `retain` and `retain_mut` passes instead of rebuilding intermediate vectors.
+- Updated README walker documentation to explicitly include `@font-feature-values` sub-rules.
+
+## [0.1.0]
+
 ### Added
 
 - Added an AST-first sanitization API built directly on top of `lightningcss`.

@@ -4,9 +4,7 @@ use common::StrictPolicy;
 use css_sanitizer::lightningcss::declaration::DeclarationBlock;
 use css_sanitizer::lightningcss::printer::PrinterOptions;
 use css_sanitizer::lightningcss::traits::ToCss;
-use css_sanitizer::{
-    clean_declaration_list_with_policy, sanitize_declaration_block_ast,
-};
+use css_sanitizer::{clean_declaration_list_with_policy, sanitize_declaration_block_ast};
 
 #[test]
 fn allows_whitelisted_property() {
@@ -39,7 +37,9 @@ fn blocks_important_by_default() {
 fn allows_important_when_enabled() {
     let result = clean_declaration_list_with_policy(
         "color: red !important",
-        &StrictPolicy::new().allow_properties(&["color"]).allow_important(),
+        &StrictPolicy::new()
+            .allow_properties(&["color"])
+            .allow_important(),
     );
     assert!(result.contains("!important"));
 }
@@ -141,7 +141,10 @@ fn sanitize_declaration_block_ast_updates_existing_ast() {
     )
     .expect("declaration block should parse");
 
-    sanitize_declaration_block_ast(&mut block, &StrictPolicy::new().allow_properties(&["color"]));
+    sanitize_declaration_block_ast(
+        &mut block,
+        &StrictPolicy::new().allow_properties(&["color"]),
+    );
 
     let result = block
         .to_css_string(PrinterOptions::default())
