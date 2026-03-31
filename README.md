@@ -149,6 +149,10 @@ Empty rules created by filtering are removed during traversal.
 - `clean_stylesheet_with_policy()`
 - `pub use lightningcss`
 
+## Used in
+
+- [SevenMark](https://github.com/sevenwiki/sevenmark) — a Markdown renderer that uses this crate to sanitize CSS blocks and inline styles. The policy implementation lives in [`crates/sevenmark_html/src/render/sanitize.rs`](https://github.com/sevenwiki/sevenmark/blob/main/crates/sevenmark_html/src/render/sanitize.rs) and is a good reference for a fail-closed, production-style policy.
+
 ## Security notes
 
 - This crate does not ship a safe default policy.
