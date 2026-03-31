@@ -11,14 +11,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Removed the selector rewrite helper APIs and their supporting example and regression tests.
 
-## [0.1.3] - 2026-03-31
-
-### Added
-
-- Added `rewrite_selector_classes()` and `rewrite_stylesheet_selector_classes()` to rewrite class selectors in parsed selector lists and stylesheets.
-- Added regression coverage for class selector rewriting across nested selector functions, `:nth-child(... of S)`, nesting rules, and `@scope` selectors.
-- Added a `rewrite_classes` example that demonstrates stylesheet-wide and selector-list class rewriting.
-
 ## [0.1.2] - 2026-03-31
 
 ### Added
