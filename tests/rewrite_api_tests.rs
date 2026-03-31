@@ -47,6 +47,21 @@ fn rewrite_stylesheet_selector_classes_updates_nested_selector_functions() {
 }
 
 #[test]
+fn rewrite_stylesheet_selector_classes_updates_vendor_any_selector_functions() {
+    let mut stylesheet = parse_stylesheet(".card:-moz-any(.notice, .info) { color: red }");
+
+    rewrite_stylesheet_selector_classes(&mut stylesheet, |name| {
+        (name == "notice").then(|| "smc-a1b2c3".to_string())
+    });
+
+    let output = serialize_stylesheet(&stylesheet);
+    assert!(output.contains(":-moz-any("));
+    assert!(output.contains(".smc-a1b2c3"));
+    assert!(output.contains(".info"));
+    assert!(!output.contains(".notice"));
+}
+
+#[test]
 fn rewrite_stylesheet_selector_classes_updates_nesting_and_scope_selectors() {
     let mut stylesheet = parse_stylesheet(
         r#"
