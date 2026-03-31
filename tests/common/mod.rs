@@ -4,8 +4,8 @@ use std::collections::{HashMap, HashSet};
 
 use css_sanitizer::lightningcss::printer::PrinterOptions;
 use css_sanitizer::lightningcss::properties::Property;
-use css_sanitizer::lightningcss::rules::font_face::FontFaceProperty;
 use css_sanitizer::lightningcss::rules::CssRule;
+use css_sanitizer::lightningcss::rules::font_face::FontFaceProperty;
 use css_sanitizer::{
     CssSanitizationPolicy, DescriptorContext, NodeAction, PropertyContext, RuleContext,
     SelectorContext,
@@ -75,6 +75,10 @@ impl StrictPolicy {
         Some(value.to_string())
     }
 
+    fn blocks_url_like_constructs(&self, css: &str) -> bool {
+        !self.allow_url && (css.contains("url(") || css.contains("image-set("))
+    }
+
     fn rule_name(rule: &CssRule<'_>) -> &'static str {
         match rule {
             CssRule::Media(_) => "media",
@@ -107,13 +111,23 @@ impl StrictPolicy {
     }
 
     fn rule_allowed(&self, rule: &CssRule<'_>) -> bool {
-        matches!(rule, CssRule::Style(_) | CssRule::Nesting(_) | CssRule::NestedDeclarations(_))
-            || self.allowed_rules.contains(Self::rule_name(rule))
+        matches!(
+            rule,
+            CssRule::Style(_) | CssRule::Nesting(_) | CssRule::NestedDeclarations(_)
+        ) || self.allowed_rules.contains(Self::rule_name(rule))
     }
 }
 
 impl CssSanitizationPolicy for StrictPolicy {
     fn visit_rule(&self, rule: &mut CssRule<'_>, _ctx: RuleContext) -> NodeAction {
+        if matches!(
+            rule,
+            CssRule::Import(_) | CssRule::Namespace(_) | CssRule::MozDocument(_)
+        ) && !self.allow_url
+        {
+            return NodeAction::Drop;
+        }
+
         if self.rule_allowed(rule) {
             NodeAction::Continue
         } else {
@@ -136,7 +150,7 @@ impl CssSanitizationPolicy for StrictPolicy {
         if css.contains("expression(") {
             return NodeAction::Drop;
         }
-        if !self.allow_url && css.contains("url(") {
+        if self.blocks_url_like_constructs(&css) {
             return NodeAction::Drop;
         }
         if !self.allow_var && css.contains("var(") {
@@ -221,7 +235,7 @@ impl CssSanitizationPolicy for FunctionSecurityPolicy {
         if css.contains("expression(") {
             return NodeAction::Drop;
         }
-        if !self.allow_url && css.contains("url(") {
+        if !self.allow_url && (css.contains("url(") || css.contains("image-set(")) {
             return NodeAction::Drop;
         }
         if !self.allow_var && css.contains("var(") {
