@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added a Criterion benchmark suite covering declaration-list sanitization, stylesheet sanitization, AST API parse-and-sanitize runs, and `lightningcss` round-trip baselines.
+
+### Changed
+
+- Documented local benchmarking workflow and the synthetic benchmark fixture strategy in the README.
+
 ## [0.1.1] - 2026-03-31
 
 ### Added

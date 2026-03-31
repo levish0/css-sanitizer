@@ -1,21 +1,102 @@
 #![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet};
+use std::convert::Infallible;
 
-use css_sanitizer::lightningcss::printer::PrinterOptions;
 use css_sanitizer::lightningcss::properties::Property;
+use css_sanitizer::lightningcss::properties::custom::{EnvironmentVariable, Function, Variable};
 use css_sanitizer::lightningcss::rules::CssRule;
 use css_sanitizer::lightningcss::rules::font_face::FontFaceProperty;
+use css_sanitizer::lightningcss::selector::{Component, SelectorList};
+use css_sanitizer::lightningcss::stylesheet::ParserOptions;
+use css_sanitizer::lightningcss::values::image::Image;
+use css_sanitizer::lightningcss::values::url::Url;
+use css_sanitizer::lightningcss::visitor::{Visit, VisitTypes, Visitor};
 use css_sanitizer::{
     CssSanitizationPolicy, DescriptorContext, NodeAction, PropertyContext, RuleContext,
     SelectorContext,
 };
 
+#[derive(Debug, Default)]
+struct PropertySecurityScan {
+    has_expression: bool,
+    has_url: bool,
+    has_var: bool,
+    has_env: bool,
+}
+
+impl PropertySecurityScan {
+    fn inspect(property: &mut Property<'_>) -> Self {
+        let mut scan = Self::default();
+        property
+            .visit(&mut scan)
+            .expect("property security scan should not fail");
+        scan
+    }
+
+    fn scan_image(&mut self, image: &Image<'_>) {
+        match image {
+            Image::Url(_) => {
+                self.has_url = true;
+            }
+            Image::ImageSet(image_set) => {
+                for option in &image_set.options {
+                    self.scan_image(&option.image);
+                }
+            }
+            Image::Gradient(_) | Image::None => {}
+        }
+    }
+}
+
+impl<'i> Visitor<'i> for PropertySecurityScan {
+    type Error = Infallible;
+
+    fn visit_types(&self) -> VisitTypes {
+        VisitTypes::URLS
+            | VisitTypes::IMAGES
+            | VisitTypes::VARIABLES
+            | VisitTypes::ENVIRONMENT_VARIABLES
+            | VisitTypes::FUNCTIONS
+    }
+
+    fn visit_url(&mut self, _url: &mut Url<'i>) -> Result<(), Self::Error> {
+        self.has_url = true;
+        Ok(())
+    }
+
+    fn visit_image(&mut self, image: &mut Image<'i>) -> Result<(), Self::Error> {
+        self.scan_image(image);
+        image.visit_children(self)
+    }
+
+    fn visit_variable(&mut self, variable: &mut Variable<'i>) -> Result<(), Self::Error> {
+        self.has_var = true;
+        variable.visit_children(self)
+    }
+
+    fn visit_environment_variable(
+        &mut self,
+        environment_variable: &mut EnvironmentVariable<'i>,
+    ) -> Result<(), Self::Error> {
+        self.has_env = true;
+        environment_variable.visit_children(self)
+    }
+
+    fn visit_function(&mut self, function: &mut Function<'i>) -> Result<(), Self::Error> {
+        if function.name.0.eq_ignore_ascii_case("expression") {
+            self.has_expression = true;
+        }
+
+        function.visit_children(self)
+    }
+}
+
 #[derive(Default)]
 pub struct StrictPolicy {
     allowed_properties: HashSet<&'static str>,
     allowed_rules: HashSet<&'static str>,
-    allowed_values: HashMap<&'static str, HashSet<String>>,
+    allowed_values: HashMap<&'static str, HashSet<&'static str>>,
     allow_important: bool,
     allow_url: bool,
     allow_var: bool,
@@ -53,30 +134,18 @@ impl StrictPolicy {
 
     pub fn allow_values(mut self, property: &'static str, values: &[&'static str]) -> Self {
         let entry = self.allowed_values.entry(property).or_default();
-        entry.extend(values.iter().map(|value| value.to_ascii_lowercase()));
+        entry.extend(values.iter().copied());
         self
     }
 
-    fn property_css(property: &Property<'_>, important: bool) -> String {
-        property
-            .to_css_string(important, PrinterOptions::default())
-            .unwrap_or_default()
-            .to_ascii_lowercase()
-    }
-
-    fn property_value(property: &Property<'_>, important: bool) -> Option<String> {
-        let css = Self::property_css(property, important);
-        let (_, value) = css.split_once(':')?;
-        let value = value.trim().trim_end_matches(';').trim();
-        let value = value
-            .strip_suffix("!important")
-            .map(str::trim)
-            .unwrap_or(value);
-        Some(value.to_string())
-    }
-
-    fn blocks_url_like_constructs(&self, css: &str) -> bool {
-        !self.allow_url && (css.contains("url(") || css.contains("image-set("))
+    fn matches_allowed_value(property: &Property<'_>, allowed_value: &'static str) -> bool {
+        Property::parse_string(
+            property.property_id(),
+            allowed_value,
+            ParserOptions::default(),
+        )
+        .map(|allowed_property| allowed_property == *property)
+        .unwrap_or(false)
     }
 
     fn rule_name(rule: &CssRule<'_>) -> &'static str {
@@ -146,22 +215,23 @@ impl CssSanitizationPolicy for StrictPolicy {
             return NodeAction::Drop;
         }
 
-        let css = Self::property_css(property, ctx.important);
-        if css.contains("expression(") {
+        let security_scan = PropertySecurityScan::inspect(property);
+        if security_scan.has_expression {
             return NodeAction::Drop;
         }
-        if self.blocks_url_like_constructs(&css) {
+        if security_scan.has_url && !self.allow_url {
             return NodeAction::Drop;
         }
-        if !self.allow_var && css.contains("var(") {
+        if security_scan.has_var && !self.allow_var {
             return NodeAction::Drop;
         }
 
         if let Some(allowed_values) = self.allowed_values.get(name) {
-            let Some(value) = Self::property_value(property, ctx.important) else {
-                return NodeAction::Drop;
-            };
-            if !allowed_values.contains(value.as_str()) {
+            if !allowed_values
+                .iter()
+                .copied()
+                .any(|allowed_value| Self::matches_allowed_value(property, allowed_value))
+            {
                 return NodeAction::Drop;
             }
         }
@@ -214,34 +284,27 @@ impl FunctionSecurityPolicy {
         self.allow_env = true;
         self
     }
-
-    fn property_css(property: &Property<'_>, important: bool) -> String {
-        property
-            .to_css_string(important, PrinterOptions::default())
-            .unwrap_or_default()
-            .to_ascii_lowercase()
-    }
 }
 
 impl CssSanitizationPolicy for FunctionSecurityPolicy {
-    fn visit_property(&self, property: &mut Property<'_>, ctx: PropertyContext) -> NodeAction {
+    fn visit_property(&self, property: &mut Property<'_>, _ctx: PropertyContext) -> NodeAction {
         let property_id = property.property_id();
         let name = property_id.name();
         if !self.allowed_properties.contains(name) {
             return NodeAction::Drop;
         }
 
-        let css = Self::property_css(property, ctx.important);
-        if css.contains("expression(") {
+        let security_scan = PropertySecurityScan::inspect(property);
+        if security_scan.has_expression {
             return NodeAction::Drop;
         }
-        if !self.allow_url && (css.contains("url(") || css.contains("image-set(")) {
+        if security_scan.has_url && !self.allow_url {
             return NodeAction::Drop;
         }
-        if !self.allow_var && css.contains("var(") {
+        if security_scan.has_var && !self.allow_var {
             return NodeAction::Drop;
         }
-        if !self.allow_env && css.contains("env(") {
+        if security_scan.has_env && !self.allow_env {
             return NodeAction::Drop;
         }
 
@@ -254,10 +317,19 @@ pub struct NoGlobalSelectors;
 impl CssSanitizationPolicy for NoGlobalSelectors {
     fn visit_selector_list(
         &self,
-        selectors: &mut css_sanitizer::lightningcss::selector::SelectorList<'_>,
+        selectors: &mut SelectorList<'_>,
         _ctx: SelectorContext,
     ) -> NodeAction {
-        if selectors.to_string().contains("html") {
+        let has_global_html_selector = selectors.0.iter().any(|selector| {
+            selector.iter_raw_match_order().any(|component| {
+                matches!(
+                    component,
+                    Component::LocalName(name) if name.lower_name.0 == "html"
+                )
+            })
+        });
+
+        if has_global_html_selector {
             NodeAction::Drop
         } else {
             NodeAction::Continue

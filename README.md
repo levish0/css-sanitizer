@@ -10,7 +10,7 @@ not a built-in preset sanitizer.
 
 ```toml
 [dependencies]
-css-sanitizer = "0.1.1"
+css-sanitizer = "0.1.2"
 ```
 
 ## Example
@@ -161,6 +161,24 @@ Empty rules created by filtering are removed during traversal.
 cargo xtask publish-dry
 cargo xtask publish
 ```
+
+## Benchmarking
+
+```bash
+cargo bench --bench sanitize
+```
+
+The Criterion benchmark suite measures:
+
+- declaration-list parse + sanitize + serialize
+- stylesheet parse + sanitize + serialize
+- stylesheet AST API parse + sanitize
+- `lightningcss` parse/serialize round-trips as a baseline next to sanitizer runs
+
+The built-in fixtures are synthetic but intentionally stress nested rules, descriptor rules,
+URLs, `var()`, and pruning behavior. If you later want real-world corpora, prefer fetching
+official distributed CSS from upstream projects during benchmarking rather than vendoring
+large third-party CSS blobs into this repository.
 
 ## License
 
