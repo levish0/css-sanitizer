@@ -14,4 +14,4 @@ categories = ["web-programming", "parser-implementations"]
 members = ["xtask"]
 
 [dependencies]
-lightningcss = { version = "=1.0.0-alpha.71", features = ["visitor"] }
+lightningcss = { version = "1.0.0-alpha.71", features = ["visitor"] }
