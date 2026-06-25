@@ -170,6 +170,24 @@ fn container_style_query_is_kept_when_url_allowed() {
 }
 
 #[test]
+fn container_nested_condition_url_is_denied() {
+    // `not()` and `and`/`or` operations are `#[skip_type]` in lightningcss, so the
+    // condition tree is walked manually; verify urls nested inside them are caught.
+    for css in [
+        "@container not (style(background: url(https://evil.test/c.png))) { .a { color: red } }",
+        "@container style(color: red) and style(background: url(https://evil.test/c.png)) { .a { color: red } }",
+    ] {
+        let result = clean_stylesheet_with_policy(
+            css,
+            &StrictPolicy::new()
+                .allow_rules(&["container"])
+                .allow_properties(&["color", "background"]),
+        );
+        assert!(!result.contains("evil"), "css={css} got: {result:?}");
+    }
+}
+
+#[test]
 fn property_initial_value_url_is_denied_by_default() {
     // `@property` `initial-value` can carry a url later fetched via `var()`.
     let result = clean_stylesheet_with_policy(
