@@ -5,6 +5,33 @@ All notable changes to css-sanitizer will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-06-26
+
+### Changed (breaking)
+
+- **`CssSanitizationPolicy` is now deny-by-default.** Every hook that admits content (`visit_rule`, `visit_selector_list` and the selector hooks, `visit_property` and the per-location property hooks, and the descriptor hooks `visit_font_face_property`/`visit_font_palette_values_property`/`visit_view_transition_property`) now defaults to `NodeAction::Drop`. An empty policy removes everything; a policy must explicitly allow what it wants to keep. Hooks that only control descent into an already-allowed rule (`visit_page_rule`, `visit_counter_style_rule`, `visit_viewport_rule`, `visit_font_feature_values_rule`, page-margin and font-feature sub-rule hooks) still default to `NodeAction::Continue`. Migration: forgetting a hook now over-removes instead of leaking; use `StrictPolicy` or override the hooks you need.
+
+### Added
+
+- **`StrictPolicy`** — a built-in allowlist policy (`allow_properties`, `allow_rules`, `allow_values`, `allow_important`, `allow_url`, `allow_var`, `allow_env`) as a vetted safe entry point.
+- **Engine-enforced value guard.** New deny-by-default hooks `check_url`, `check_variable`, `check_environment_variable`, and `check_token` are run by the engine (via lightningcss's `Visit` traversal) over every kept declaration and descriptor. Value-level exfiltration vectors — including `@font-face` `src`, `image-set()`, `var()`/`env()` fallbacks, and raw `url()` tokens recovered from malformed input — can no longer leak even if a structural hook is omitted.
+- **`SanitizeOptions`** (`max_depth`, `enforce_value_guard`) plus `*_with_options` variants of all four entry points (`sanitize_stylesheet_ast_with_options`, `sanitize_declaration_block_ast_with_options`, `clean_stylesheet_with_policy_and_options`, `clean_declaration_list_with_policy_and_options`).
+- **`visit_scope_selectors`** hook and `ValueAction`/`ValueContext`/`ValueLocation` types.
+- Differential completeness test that uses lightningcss's `Visit` traversal as an oracle, plus regression tests for the fixes below.
+
+### Fixed
+
+- **`@scope` prelude selectors** (`scope_start`/`scope_end`) are now sanitized through the selector hooks; previously they bypassed all selector policies.
+- **`@container` style query conditions** (`style(prop: value)`, including nested `not()`/`and`/`or`) are now value-guarded; previously a `url()` embedded in a container condition bypassed the value guard.
+- **`@property` `initial-value`** is now value-guarded; previously a `url()` registered as a custom property's initial value (later fetched via `var()`) bypassed the value guard. The field is `#[skip_visit]` in lightningcss, so it is handled explicitly.
+- **Descriptor value bypass**: value checks now apply uniformly to descriptors, so a url-blocking policy also covers `@font-face` `src`.
+- **Unbounded recursion**: a configurable depth cap (`max_depth`, default 256) drops overly nested rules fail-closed to bound the sanitizer's own recursion. Note that lightningcss's parser recurses before the sanitizer and is not bound by this cap; bound untrusted input size upstream.
+
+### Notes
+
+- `NodeAction` and `ValueAction` are now `#[non_exhaustive]`.
+- `ValueLocation` gains `ContainerCondition` and `PropertyInitialValue` variants.
+
 ## [0.1.4] - 2026-03-31
 
 ### Removed

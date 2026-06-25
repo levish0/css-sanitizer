@@ -6,13 +6,19 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use css_sanitizer::lightningcss::declaration::DeclarationBlock;
 use css_sanitizer::lightningcss::printer::PrinterOptions;
 use css_sanitizer::lightningcss::properties::Property;
+use css_sanitizer::lightningcss::properties::custom::{
+    EnvironmentVariable, TokenOrValue, Variable,
+};
 use css_sanitizer::lightningcss::rules::CssRule;
 use css_sanitizer::lightningcss::rules::font_face::FontFaceProperty;
+use css_sanitizer::lightningcss::selector::SelectorList;
 use css_sanitizer::lightningcss::stylesheet::{ParserOptions, StyleSheet};
 use css_sanitizer::lightningcss::traits::ToCss;
+use css_sanitizer::lightningcss::values::url::Url;
 use css_sanitizer::{
     CssSanitizationPolicy, DescriptorContext, NodeAction, PropertyContext, RuleContext,
-    clean_declaration_list_with_policy, clean_stylesheet_with_policy, sanitize_stylesheet_ast,
+    SelectorContext, ValueAction, ValueContext, clean_declaration_list_with_policy,
+    clean_stylesheet_with_policy, sanitize_stylesheet_ast,
 };
 
 struct Fixture {
@@ -22,7 +28,51 @@ struct Fixture {
 
 struct PassThroughPolicy;
 
-impl CssSanitizationPolicy for PassThroughPolicy {}
+impl CssSanitizationPolicy for PassThroughPolicy {
+    fn visit_rule(&self, _rule: &mut CssRule<'_>, _ctx: RuleContext) -> NodeAction {
+        NodeAction::Continue
+    }
+
+    fn visit_selector_list(
+        &self,
+        _selectors: &mut SelectorList<'_>,
+        _ctx: SelectorContext,
+    ) -> NodeAction {
+        NodeAction::Continue
+    }
+
+    fn visit_property(&self, _property: &mut Property<'_>, _ctx: PropertyContext) -> NodeAction {
+        NodeAction::Continue
+    }
+
+    fn visit_font_face_property(
+        &self,
+        _property: &mut FontFaceProperty<'_>,
+        _ctx: DescriptorContext,
+    ) -> NodeAction {
+        NodeAction::Continue
+    }
+
+    fn check_url(&self, _url: &Url<'_>, _ctx: ValueContext) -> ValueAction {
+        ValueAction::Allow
+    }
+
+    fn check_variable(&self, _v: &Variable<'_>, _ctx: ValueContext) -> ValueAction {
+        ValueAction::Allow
+    }
+
+    fn check_environment_variable(
+        &self,
+        _e: &EnvironmentVariable<'_>,
+        _ctx: ValueContext,
+    ) -> ValueAction {
+        ValueAction::Allow
+    }
+
+    fn check_token(&self, _t: &TokenOrValue<'_>, _ctx: ValueContext) -> ValueAction {
+        ValueAction::Allow
+    }
+}
 
 struct FilteringPolicy;
 
@@ -84,6 +134,14 @@ impl CssSanitizationPolicy for FilteringPolicy {
         } else {
             NodeAction::Drop
         }
+    }
+
+    fn visit_selector_list(
+        &self,
+        _selectors: &mut SelectorList<'_>,
+        _ctx: SelectorContext,
+    ) -> NodeAction {
+        NodeAction::Continue
     }
 
     fn visit_property(&self, property: &mut Property<'_>, ctx: PropertyContext) -> NodeAction {
