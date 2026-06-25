@@ -1,6 +1,7 @@
 mod common;
 
 use common::{DropImportant, DropImports, NoGlobalSelectors};
+use css_sanitizer::lightningcss::rules::CssRule;
 use css_sanitizer::lightningcss::rules::font_feature_values::{
     FontFeatureSubrule, FontFeatureSubruleType,
 };
@@ -13,6 +14,14 @@ use css_sanitizer::{
 struct DropSwashSubrules;
 
 impl CssSanitizationPolicy for DropSwashSubrules {
+    fn visit_rule(&self, rule: &mut CssRule<'_>, _ctx: RuleContext) -> NodeAction {
+        if matches!(rule, CssRule::FontFeatureValues(_)) {
+            NodeAction::Continue
+        } else {
+            NodeAction::Drop
+        }
+    }
+
     fn visit_font_feature_values_subrule(
         &self,
         subrule: &mut FontFeatureSubrule<'_>,

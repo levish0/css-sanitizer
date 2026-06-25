@@ -3,14 +3,18 @@
 Policy-driven CSS sanitization on top of [lightningcss](https://lightningcss.dev/).
 
 This crate exposes `lightningcss` directly and lets you sanitize rules, selectors,
-properties, and descriptors through a custom policy trait. It is an AST policy engine,
-not a built-in preset sanitizer.
+properties, and descriptors through a custom policy trait. The policy interface is
+**deny-by-default**: an empty policy removes everything, and the engine independently
+enforces a value guard so exfiltration vectors such as `url()`, `var()`, and `env()`
+cannot leak — even through `@font-face` `src`, `image-set()`, `var()` fallbacks, or
+tokens recovered from malformed input — unless the policy opts into them. A built-in
+`StrictPolicy` allowlist is provided as a safe starting point.
 
 ## Install
 
 ```toml
 [dependencies]
-css-sanitizer = "0.1.4"
+css-sanitizer = "0.3.0"
 ```
 
 ## Example
@@ -21,42 +25,62 @@ cargo run --example sanitize_strings
 
 ## Core model
 
-- `CssSanitizationPolicy` is the main extension point.
+- `StrictPolicy` is the built-in allowlist policy; use it as a safe default.
+- `CssSanitizationPolicy` is the extension point for custom policies.
 - `clean_declaration_list_with_policy()` and `clean_stylesheet_with_policy()` parse, sanitize, and serialize strings.
 - `sanitize_declaration_block_ast()` and `sanitize_stylesheet_ast()` mutate parsed `lightningcss` ASTs in place.
+- The `*_with_options` variants accept a `SanitizeOptions` (recursion depth cap, value-guard toggle).
 - `lightningcss` is re-exported so callers can work against the same AST types.
 
-Default trait methods are fail-open. If you want a strict sanitizer, your policy must
-explicitly return `NodeAction::Drop` for anything you do not want to keep.
+Every hook that admits content is **deny-by-default** (`NodeAction::Drop`), and the
+value-guard hooks (`check_url`, `check_variable`, `check_environment_variable`,
+`check_token`) default to `ValueAction::Deny`. Forgetting a hook fails safe by
+over-removing rather than leaking content.
 
-## Quick start
+## Quick start (built-in strict policy)
+
+```rust
+use css_sanitizer::{clean_stylesheet_with_policy, StrictPolicy};
+
+let safe = clean_stylesheet_with_policy(
+    "@import url('evil.css'); .card { color: red; position: fixed }",
+    &StrictPolicy::new().allow_properties(&["color"]),
+);
+
+assert!(!safe.contains("@import"));
+assert!(safe.contains("color"));
+assert!(!safe.contains("position"));
+```
+
+## Custom policy
+
+Because the trait is deny-by-default, a custom policy must allow each kind of node it
+wants to keep — including selectors.
 
 ```rust
 use css_sanitizer::{
     clean_stylesheet_with_policy, CssSanitizationPolicy, NodeAction, PropertyContext,
-    RuleContext,
+    RuleContext, SelectorContext,
 };
+use css_sanitizer::lightningcss::properties::Property;
 use css_sanitizer::lightningcss::rules::CssRule;
+use css_sanitizer::lightningcss::selector::SelectorList;
 
-struct StyleColorOnly;
+struct ColorOnly;
 
-impl CssSanitizationPolicy for StyleColorOnly {
-    fn visit_rule(
-        &self,
-        rule: &mut CssRule<'_>,
-        _ctx: RuleContext,
-    ) -> NodeAction {
+impl CssSanitizationPolicy for ColorOnly {
+    fn visit_rule(&self, rule: &mut CssRule<'_>, _ctx: RuleContext) -> NodeAction {
         match rule {
             CssRule::Style(_) => NodeAction::Continue,
             _ => NodeAction::Drop,
         }
     }
 
-    fn visit_property(
-        &self,
-        property: &mut css_sanitizer::lightningcss::properties::Property<'_>,
-        _ctx: PropertyContext,
-    ) -> NodeAction {
+    fn visit_selector_list(&self, _s: &mut SelectorList<'_>, _c: SelectorContext) -> NodeAction {
+        NodeAction::Continue
+    }
+
+    fn visit_property(&self, property: &mut Property<'_>, _ctx: PropertyContext) -> NodeAction {
         if property.property_id().name() == "color" {
             NodeAction::Continue
         } else {
@@ -65,12 +89,7 @@ impl CssSanitizationPolicy for StyleColorOnly {
     }
 }
 
-let safe = clean_stylesheet_with_policy(
-    "@import url('evil.css'); .card { color: red; position: fixed }",
-    &StyleColorOnly,
-);
-
-assert!(!safe.contains("@import"));
+let safe = clean_stylesheet_with_policy(".card { color: red; position: fixed }", &ColorOnly);
 assert!(safe.contains("color"));
 assert!(!safe.contains("position"));
 ```
@@ -78,33 +97,14 @@ assert!(!safe.contains("position"));
 ## In-place AST sanitization
 
 ```rust
-use css_sanitizer::{
-    sanitize_stylesheet_ast, CssSanitizationPolicy, NodeAction, RuleContext,
-};
-use css_sanitizer::lightningcss::rules::CssRule;
+use css_sanitizer::{sanitize_stylesheet_ast, StrictPolicy};
 use css_sanitizer::lightningcss::stylesheet::{ParserOptions, StyleSheet};
-
-struct NoImports;
-
-impl CssSanitizationPolicy for NoImports {
-    fn visit_rule(
-        &self,
-        rule: &mut CssRule<'_>,
-        _ctx: RuleContext,
-    ) -> NodeAction {
-        if matches!(rule, CssRule::Import(_)) {
-            NodeAction::Drop
-        } else {
-            NodeAction::Continue
-        }
-    }
-}
 
 let mut stylesheet =
     StyleSheet::parse("@import url('evil.css'); .card { color: blue }", ParserOptions::default())
         .expect("stylesheet should parse");
 
-sanitize_stylesheet_ast(&mut stylesheet, &NoImports);
+sanitize_stylesheet_ast(&mut stylesheet, &StrictPolicy::new().allow_properties(&["color"]));
 
 let output = stylesheet
     .to_css(Default::default())
@@ -129,30 +129,39 @@ The built-in walker already handles:
 - `@page` and page margin rules
 - `@counter-style`
 - `@viewport`
-- selector lists on style-like rules
+- selector lists on style-like rules, including `@scope` prelude (`scope_start`/`scope_end`) selectors
 - normal properties and `!important` declarations
 - descriptor-style nodes exposed by `lightningcss`
+- `@container` style query conditions and `@property` `initial-value`
+- a value guard over every kept declaration and descriptor that reaches `url()`, `var()`, `env()`, `image-set()` images, and raw tokens
 
-Empty rules created by filtering are removed during traversal.
+Empty rules created by filtering are removed during traversal. Rules nested deeper than
+`SanitizeOptions::max_depth` (default 256) are dropped to bound the sanitizer's recursion.
+
+> **Note on deeply nested input:** `max_depth` bounds the sanitizer's own traversal, not
+> lightningcss's parser, which recurses before sanitization runs. Pathologically nested
+> untrusted input can overflow the stack during parsing; bound input size upstream if that
+> is a concern.
 
 ## API surface
 
+- `StrictPolicy`
 - `CssSanitizationPolicy`
-- `NodeAction`
-- `RuleContext`
-- `SelectorContext`
-- `PropertyContext`
-- `DescriptorContext`
-- `sanitize_declaration_block_ast()`
-- `sanitize_stylesheet_ast()`
-- `clean_declaration_list_with_policy()`
-- `clean_stylesheet_with_policy()`
+- `NodeAction`, `ValueAction`
+- `RuleContext`, `SelectorContext`, `PropertyContext`, `DescriptorContext`, `ValueContext`, `ValueLocation`
+- `SanitizeOptions`
+- `sanitize_declaration_block_ast()` / `sanitize_declaration_block_ast_with_options()`
+- `sanitize_stylesheet_ast()` / `sanitize_stylesheet_ast_with_options()`
+- `clean_declaration_list_with_policy()` / `clean_declaration_list_with_policy_and_options()`
+- `clean_stylesheet_with_policy()` / `clean_stylesheet_with_policy_and_options()`
 - `pub use lightningcss`
 
 ## Security notes
 
-- This crate does not ship a safe default policy.
-- Selector scoping, `@import`, remote URLs, `!important`, `var()`, and unknown rules are all policy decisions.
+- The policy is deny-by-default: anything not explicitly allowed is removed, so forgetting a hook fails safe.
+- The engine-enforced value guard means `url()`, `var()`, and `env()` cannot leak unless the policy allows them, regardless of which structural hooks are overridden. This covers `@font-face` `src`, `image-set()`, `var()`/`env()` fallbacks, and raw `url()` tokens recovered from malformed input.
+- Selector scoping, `@import`, remote URLs, and `!important` are policy decisions; `StrictPolicy` denies all of them unless opted in.
+- `NodeAction::Skip` keeps a node but bypasses deeper sanitization (including the value guard) for its children; avoid it in a strict policy.
 - `var(--x)` still cannot be resolved statically across external cascade boundaries unless your own policy or environment model provides that information.
 
 ## Publishing

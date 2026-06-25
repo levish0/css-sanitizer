@@ -12,3 +12,4 @@ This folder stores milestone snapshots for agent handoff. Use it after a user-ap
 Use `memory/TEMPLATE.md`. Keep entries concise but complete enough to resume implementation.
 
 ## Current Entries
+- [2026-06-26 0.3.0 deny-by-default redesign](2026-06-26-0.3.0-deny-by-default.md) — deny-by-default policy + engine value guard + StrictPolicy + @scope/@container/@property/depth fixes (post-review).

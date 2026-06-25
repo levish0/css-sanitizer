@@ -1,30 +1,27 @@
 use css_sanitizer::lightningcss::properties::Property;
 use css_sanitizer::lightningcss::rules::CssRule;
+use css_sanitizer::lightningcss::selector::SelectorList;
 use css_sanitizer::{
-    CssSanitizationPolicy, NodeAction, PropertyContext, RuleContext,
+    CssSanitizationPolicy, NodeAction, PropertyContext, RuleContext, SelectorContext,
     clean_declaration_list_with_policy, clean_stylesheet_with_policy,
 };
 
 struct DemoPolicy;
 
 impl DemoPolicy {
+    // Only the property name and `!important` are decided here. Values such as
+    // `url()`/`expression()` are handled by the engine-enforced value guard,
+    // whose `check_*` hooks are deny-by-default and are not overridden below.
     fn allow_property(property: &Property<'_>, important: bool) -> bool {
         if important {
             return false;
         }
 
         let property_id = property.property_id();
-        let name = property_id.name();
-        if !matches!(name, "color" | "background-color" | "font-size") {
-            return false;
-        }
-
-        let css = property
-            .to_css_string(important, Default::default())
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-
-        !css.contains("url(") && !css.contains("expression(")
+        matches!(
+            property_id.name(),
+            "color" | "background-color" | "font-size"
+        )
     }
 }
 
@@ -34,6 +31,14 @@ impl CssSanitizationPolicy for DemoPolicy {
             CssRule::Style(_) => NodeAction::Continue,
             _ => NodeAction::Drop,
         }
+    }
+
+    fn visit_selector_list(
+        &self,
+        _selectors: &mut SelectorList<'_>,
+        _ctx: SelectorContext,
+    ) -> NodeAction {
+        NodeAction::Continue
     }
 
     fn visit_property(&self, property: &mut Property<'_>, ctx: PropertyContext) -> NodeAction {
