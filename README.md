@@ -6,8 +6,8 @@ This crate exposes `lightningcss` directly and lets you sanitize rules, selector
 properties, and descriptors through a custom policy trait. The policy interface is
 **deny-by-default**: an empty policy removes everything, and the engine independently
 enforces a value guard so exfiltration vectors such as `url()`, `var()`, and `env()`
-cannot leak — even through `@font-face` `src`, `image-set()`, `var()` fallbacks, or
-tokens recovered from malformed input — unless the policy opts into them. A built-in
+cannot leak. Even through `@font-face` `src`, `image-set()`, `var()` fallbacks, or
+tokens recovered from malformed input unless the policy opts into them. A built-in
 `StrictPolicy` allowlist is provided as a safe starting point.
 
 ## Install
