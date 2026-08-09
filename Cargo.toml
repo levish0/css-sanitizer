@@ -17,7 +17,7 @@ bench = false
 members = ["xtask"]
 
 [dependencies]
-lightningcss = { version = "1.0.0-alpha.71", features = ["visitor"] }
+lightningcss = { version = "1.0.0-alpha.72", features = ["visitor"] }
 
 [dev-dependencies]
 criterion = "0.8.2"
