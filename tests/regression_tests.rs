@@ -2,13 +2,16 @@
 
 mod common;
 
+use std::cell::Cell;
+
 use css_sanitizer::lightningcss::rules::CssRule;
+use css_sanitizer::lightningcss::rules::font_face::FontFaceProperty;
 use css_sanitizer::lightningcss::selector::{Component, SelectorList};
 use css_sanitizer::{
-    CssSanitizationPolicy, NodeAction, PropertyContext, RuleContext, SanitizeOptions,
-    SelectorContext, StrictPolicy, ValueAction, ValueContext, clean_declaration_list_with_policy,
-    clean_declaration_list_with_policy_and_options, clean_stylesheet_with_policy,
-    clean_stylesheet_with_policy_and_options,
+    CssSanitizationPolicy, DescriptorContext, NodeAction, PropertyContext, RuleContext,
+    SanitizeOptions, SelectorContext, StrictPolicy, ValueAction, ValueContext, ValueLocation,
+    clean_declaration_list_with_policy, clean_declaration_list_with_policy_and_options,
+    clean_stylesheet_with_policy, clean_stylesheet_with_policy_and_options,
 };
 
 /// Allows `@scope`/style rules and all declarations, but drops any selector list
@@ -248,4 +251,171 @@ fn value_guard_can_be_disabled() {
         SanitizeOptions::default().with_value_guard(false),
     );
     assert!(result.contains("url("), "got: {result:?}");
+}
+
+struct SkipCannotBypassGuard;
+
+impl CssSanitizationPolicy for SkipCannotBypassGuard {
+    fn visit_rule(&self, rule: &mut CssRule<'_>, _ctx: RuleContext) -> NodeAction {
+        if matches!(
+            rule,
+            CssRule::Style(_) | CssRule::FontFace(_) | CssRule::Import(_)
+        ) {
+            NodeAction::Skip
+        } else {
+            NodeAction::Drop
+        }
+    }
+
+    fn visit_selector_list(
+        &self,
+        _selectors: &mut SelectorList<'_>,
+        _ctx: SelectorContext,
+    ) -> NodeAction {
+        NodeAction::Skip
+    }
+
+    fn visit_property(
+        &self,
+        _property: &mut css_sanitizer::lightningcss::properties::Property<'_>,
+        _ctx: PropertyContext,
+    ) -> NodeAction {
+        NodeAction::Skip
+    }
+
+    fn visit_font_face_property(
+        &self,
+        _property: &mut FontFaceProperty<'_>,
+        _ctx: DescriptorContext,
+    ) -> NodeAction {
+        NodeAction::Skip
+    }
+}
+
+#[test]
+fn skip_cannot_bypass_property_resource_guard() {
+    let result = clean_stylesheet_with_policy(
+        ".a { color: red; background-image: url('https://evil.test/a.png') }",
+        &SkipCannotBypassGuard,
+    );
+
+    assert!(result.contains("color"), "got: {result:?}");
+    assert!(!result.contains("evil.test"), "got: {result:?}");
+    assert!(!result.contains("url("), "got: {result:?}");
+}
+
+#[test]
+fn skip_cannot_bypass_descriptor_resource_guard() {
+    let result = clean_stylesheet_with_policy(
+        "@font-face { font-family: Test; src: url('https://evil.test/a.woff2') }",
+        &SkipCannotBypassGuard,
+    );
+
+    assert!(result.contains("font-family"), "got: {result:?}");
+    assert!(!result.contains("evil.test"), "got: {result:?}");
+    assert!(!result.contains("url("), "got: {result:?}");
+}
+
+#[test]
+fn skip_cannot_bypass_import_resource_guard() {
+    let result = clean_stylesheet_with_policy(
+        "@import 'https://evil.test/theme.css';",
+        &SkipCannotBypassGuard,
+    );
+
+    assert!(result.is_empty(), "got: {result:?}");
+}
+
+#[test]
+fn position_try_declarations_are_filtered_and_resource_guarded() {
+    let result = clean_stylesheet_with_policy(
+        "@position-try --fallback { top: 10px; background-image: url('https://evil.test/p.png') }",
+        &StrictPolicy::new()
+            .allow_rules(&["position-try"])
+            .allow_properties(&["top", "background-image"]),
+    );
+
+    assert!(result.contains("@position-try"), "got: {result:?}");
+    assert!(result.contains("top"), "got: {result:?}");
+    assert!(!result.contains("evil.test"), "got: {result:?}");
+}
+
+#[derive(Default)]
+struct PositionTryHookPolicy {
+    property_hook_called: Cell<bool>,
+    resource_location: Cell<Option<ValueLocation>>,
+}
+
+impl CssSanitizationPolicy for PositionTryHookPolicy {
+    fn visit_rule(&self, rule: &mut CssRule<'_>, _ctx: RuleContext) -> NodeAction {
+        if matches!(rule, CssRule::PositionTry(_)) {
+            NodeAction::Continue
+        } else {
+            NodeAction::Drop
+        }
+    }
+
+    fn visit_property(
+        &self,
+        _property: &mut css_sanitizer::lightningcss::properties::Property<'_>,
+        _ctx: PropertyContext,
+    ) -> NodeAction {
+        NodeAction::Drop
+    }
+
+    fn visit_position_try_property(
+        &self,
+        _property: &mut css_sanitizer::lightningcss::properties::Property<'_>,
+        _ctx: PropertyContext,
+    ) -> NodeAction {
+        self.property_hook_called.set(true);
+        NodeAction::Continue
+    }
+
+    fn check_resource(
+        &self,
+        _resource: css_sanitizer::ResourceRef<'_>,
+        ctx: ValueContext,
+    ) -> ValueAction {
+        self.resource_location.set(Some(ctx.location));
+        ValueAction::Allow
+    }
+}
+
+#[test]
+fn position_try_uses_dedicated_property_hook_and_value_location() {
+    let policy = PositionTryHookPolicy::default();
+    let result = clean_stylesheet_with_policy(
+        "@position-try --fallback { background-image: url('fallback.png') }",
+        &policy,
+    );
+
+    assert!(policy.property_hook_called.get());
+    assert_eq!(
+        policy.resource_location.get(),
+        Some(ValueLocation::PositionTry)
+    );
+    assert!(result.contains("fallback.png"), "got: {result:?}");
+}
+
+#[test]
+fn empty_position_try_rule_is_pruned() {
+    let result = clean_stylesheet_with_policy(
+        "@position-try --fallback { background-image: url('https://evil.test/p.png') }",
+        &StrictPolicy::new()
+            .allow_rules(&["position-try"])
+            .allow_properties(&["background-image"]),
+    );
+
+    assert!(result.is_empty(), "got: {result:?}");
+}
+
+#[test]
+fn strict_policy_never_allows_unknown_at_rules_by_category() {
+    let result = clean_stylesheet_with_policy(
+        "@future-resource 'https://evil.test/x' { payload: yes }",
+        &StrictPolicy::new().allow_rules(&["unknown"]),
+    );
+
+    assert!(result.is_empty(), "got: {result:?}");
 }

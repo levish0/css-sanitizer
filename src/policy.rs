@@ -1,5 +1,5 @@
 use lightningcss::properties::Property;
-use lightningcss::properties::custom::{EnvironmentVariable, TokenOrValue, Variable};
+use lightningcss::properties::custom::{EnvironmentVariable, Function, TokenOrValue, Variable};
 use lightningcss::rules::CssRule;
 use lightningcss::rules::counter_style::CounterStyleRule;
 use lightningcss::rules::font_face::FontFaceProperty;
@@ -17,10 +17,64 @@ use lightningcss::values::url::Url;
 pub enum NodeAction {
     /// Continue with the sanitizer's normal traversal for this node.
     Continue,
-    /// Keep this node, but skip any deeper sanitization for its children.
+    /// Keep this node. Retained for API compatibility; the engine still runs
+    /// its normal traversal and any enabled value/resource guards so this
+    /// cannot itself be used to bypass sanitization.
     Skip,
     /// Drop this node entirely.
     Drop,
+}
+
+/// Identifies the CSS syntax that produced a potentially fetchable resource.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ResourceKind {
+    /// A typed or raw `url()` value. This also includes image-set options that
+    /// lightningcss normalizes into typed URL images.
+    Url,
+    /// A CSS Values `src()` function.
+    Src,
+    /// A string or dynamic value inside `image()`.
+    Image,
+    /// A string or dynamic value inside a generic/unparsed `image-set()`.
+    ImageSet,
+    /// The URL in an `@import` rule.
+    Import,
+}
+
+/// A potentially fetchable resource found by the engine.
+///
+/// `value` is `None` when the resource is dynamic (for example
+/// `src(var(--font-url))`) or otherwise cannot be recovered statically.
+///
+/// A literal `value` is parser-decoded but otherwise unresolved: it may be
+/// relative and is not guaranteed to be an absolute or normalized URL. A
+/// policy enforcing origins should resolve it with a standards-compatible URL
+/// parser against a trusted base URL owned by that policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ResourceRef<'a> {
+    /// The CSS construct that produced the resource reference.
+    pub kind: ResourceKind,
+    /// The statically known resource string, or `None` when it is dynamic or
+    /// otherwise not statically recoverable.
+    pub value: Option<&'a str>,
+}
+
+impl<'a> ResourceRef<'a> {
+    /// Creates a resource reference with a statically known value.
+    pub fn literal(kind: ResourceKind, value: &'a str) -> Self {
+        Self {
+            kind,
+            value: Some(value),
+        }
+    }
+
+    /// Creates a resource reference whose final URL is dynamic or otherwise not
+    /// statically recoverable, including runtime substitution such as `var()`.
+    pub fn dynamic(kind: ResourceKind) -> Self {
+        Self { kind, value: None }
+    }
 }
 
 /// Controls how the engine-enforced value guard should handle a single value
@@ -29,7 +83,8 @@ pub enum NodeAction {
 ///
 /// Unlike [`NodeAction`], these checks default to [`ValueAction::Deny`]: a policy
 /// that does not explicitly allow a value kind causes the entire containing
-/// declaration/descriptor to be dropped. This is what makes value-level
+/// declaration/descriptor (or containing resource-bearing rule) to be dropped.
+/// This is what makes value-level
 /// exfiltration vectors (e.g. `url()` smuggled into a `var()` fallback or an
 /// `@font-face` `src`) impossible to leak by forgetting a hook.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,7 +92,8 @@ pub enum NodeAction {
 pub enum ValueAction {
     /// Allow this value (and continue scanning its children).
     Allow,
-    /// Reject this value, dropping the declaration/descriptor that contains it.
+    /// Reject this value, dropping its declaration, descriptor, or
+    /// resource-bearing rule.
     Deny,
 }
 
@@ -61,6 +117,8 @@ pub enum ValueLocation {
     CounterStyle,
     /// A declaration inside `@viewport`.
     Viewport,
+    /// A declaration inside `@position-try`.
+    PositionTry,
     /// An `@font-face` descriptor.
     FontFaceDescriptor,
     /// An `@font-palette-values` descriptor.
@@ -71,6 +129,8 @@ pub enum ValueLocation {
     ContainerCondition,
     /// The `initial-value` of an `@property` rule.
     PropertyInitialValue,
+    /// The URL in an `@import` rule.
+    ImportRule,
 }
 
 /// Context for a value inspected by the engine-enforced value guard.
@@ -123,10 +183,9 @@ pub struct DescriptorContext {
 /// deny-gated downstream. They are only reached after [`visit_rule`](Self::visit_rule)
 /// has already allowed the enclosing rule.
 ///
-/// Implementors can also inspect or mutate AST nodes directly and return
-/// [`NodeAction::Skip`] to keep a node while bypassing deeper sanitization for
-/// its children. Note that `Skip` also bypasses the engine-enforced value guard
-/// for that node's contents, so it should be used with care in a strict policy.
+/// Implementors can inspect or mutate AST nodes directly. [`NodeAction::Skip`]
+/// is retained for compatibility but does not bypass engine traversal or the
+/// enabled value/resource guards.
 ///
 /// See [`StrictPolicy`](crate::StrictPolicy) for a ready-made allowlist policy.
 pub trait CssSanitizationPolicy {
@@ -249,6 +308,15 @@ pub trait CssSanitizationPolicy {
         self.visit_property(property, ctx)
     }
 
+    /// Called for declarations inside `@position-try`.
+    fn visit_position_try_property(
+        &self,
+        property: &mut Property<'_>,
+        ctx: PropertyContext,
+    ) -> NodeAction {
+        self.visit_property(property, ctx)
+    }
+
     /// Called for `@font-face` descriptors. Defaults to [`NodeAction::Drop`].
     fn visit_font_face_property(
         &self,
@@ -324,11 +392,24 @@ pub trait CssSanitizationPolicy {
         NodeAction::Continue
     }
 
-    /// Engine-enforced guard: called for every `url()` found inside a kept
-    /// declaration or descriptor. Defaults to [`ValueAction::Deny`]; returning
-    /// [`ValueAction::Deny`] drops the entire containing declaration/descriptor.
-    fn check_url(&self, _url: &Url<'_>, _ctx: ValueContext) -> ValueAction {
+    /// Central engine-enforced guard for potentially fetchable resources,
+    /// including raw URL forms, `src()`, string-based image functions, and
+    /// `@import`. The default [`check_url`](Self::check_url) implementation also
+    /// routes typed URLs here. Dynamic references have [`ResourceRef::value`]
+    /// set to `None`. Defaults to [`ValueAction::Deny`].
+    fn check_resource(&self, _resource: ResourceRef<'_>, _ctx: ValueContext) -> ValueAction {
         ValueAction::Deny
+    }
+
+    /// Compatibility hook for typed `url()` values. The default implementation
+    /// routes through [`check_resource`](Self::check_resource). An existing
+    /// policy that overrides `check_url` keeps that behavior; delegate to or
+    /// remove the override to centralize typed URLs in `check_resource`.
+    fn check_url(&self, url: &Url<'_>, ctx: ValueContext) -> ValueAction {
+        self.check_resource(
+            ResourceRef::literal(ResourceKind::Url, url.url.as_ref()),
+            ctx,
+        )
     }
 
     /// Engine-enforced guard: called for every `var()` reference found inside a
@@ -347,11 +428,38 @@ pub trait CssSanitizationPolicy {
         ValueAction::Deny
     }
 
-    /// Engine-enforced guard: called for raw tokens in unparsed/custom values
-    /// that are not represented as a more specific value (e.g. an unquoted
-    /// `url(...)` token or a custom function token recovered from malformed
-    /// input). This is the backstop against value smuggling through
-    /// `error_recovery`. Defaults to [`ValueAction::Deny`].
+    /// Engine-enforced guard for a case/escape variant of `var()` that
+    /// lightningcss left as a generic function rather than a typed
+    /// [`Variable`]. Defaults to deny. Its arguments are still scanned after
+    /// this hook allows it.
+    fn check_unparsed_variable(&self, _function: &Function<'_>, _ctx: ValueContext) -> ValueAction {
+        ValueAction::Deny
+    }
+
+    /// Engine-enforced guard for a case/escape variant of `env()` that
+    /// lightningcss left as a generic function rather than a typed
+    /// [`EnvironmentVariable`]. Defaults to deny. Its arguments are still
+    /// scanned after this hook allows it.
+    fn check_unparsed_environment_variable(
+        &self,
+        _function: &Function<'_>,
+        _ctx: ValueContext,
+    ) -> ValueAction {
+        ValueAction::Deny
+    }
+
+    /// Engine-enforced guard for generic functions in raw/unparsed values.
+    /// Functions with resource or dynamic-substitution semantics are routed
+    /// through their dedicated hooks instead. Defaults to deny so future CSS
+    /// functions cannot become a fail-open path.
+    fn check_function(&self, _function: &Function<'_>, _ctx: ValueContext) -> ValueAction {
+        ValueAction::Deny
+    }
+
+    /// Engine-enforced guard for raw tokens left after more-specific resource,
+    /// function, variable, and environment-variable routing. This hook is the
+    /// final backstop against value smuggling through `error_recovery`.
+    /// Defaults to [`ValueAction::Deny`].
     fn check_token(&self, _token: &TokenOrValue<'_>, _ctx: ValueContext) -> ValueAction {
         ValueAction::Deny
     }

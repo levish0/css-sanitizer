@@ -183,7 +183,7 @@ fn benchmark_config() -> Criterion {
         .measurement_time(Duration::from_secs(2))
 }
 
-fn parser_options<'i>() -> ParserOptions<'static, 'i> {
+fn parser_options<'i>() -> ParserOptions<'i> {
     ParserOptions {
         error_recovery: true,
         ..ParserOptions::default()

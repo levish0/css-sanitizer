@@ -25,11 +25,13 @@ pub struct SanitizeOptions {
     /// during parsing regardless of this setting; bound untrusted input size
     /// upstream if that is a concern.
     pub max_depth: usize,
-    /// Whether to run the engine-enforced value guard over kept declarations
-    /// and descriptors. Enabled by default.
+    /// Whether to run the engine-enforced value/resource guard over kept
+    /// declarations, descriptors, and resource-bearing rules. Enabled by
+    /// default.
     ///
-    /// Setting this to `false` disables all value-level protection: `url()`,
-    /// `var()`, `env()`, and raw tokens are no longer checked, so the policy's
+    /// Setting this to `false` disables all value-level protection: resources
+    /// (`url()`, `src()`, image functions, and `@import`), `var()`, `env()`,
+    /// generic functions, and raw tokens are no longer checked, so the policy's
     /// `check_*` hooks become inert. Only disable it if the policy enforces value
     /// safety by other means.
     pub enforce_value_guard: bool,

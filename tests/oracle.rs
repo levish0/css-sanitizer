@@ -1,11 +1,12 @@
 //! Differential completeness test.
 //!
-//! lightningcss's own `Visit` traversal is completeness-by-construction (every
-//! AST node derives `Visit`). We use it as an *oracle*: for a corpus of CSS, the
+//! lightningcss's own `Visit` traversal is generated from its AST definitions.
+//! We use it as an *oracle*: for a corpus of CSS, the
 //! number of selector lists and the set of urls that lightningcss's traversal
-//! reaches must be a subset of what the sanitizer's policy is given a chance to
-//! inspect. If a future lightningcss upgrade adds a construct the hand-written
-//! traversal misses, this test fails.
+//! reaches must equal what the sanitizer's policy is given a chance to inspect.
+//! This verifies typed AST traversal for constructs present in the corpus;
+//! semantic resources that lightningcss leaves generic are tested separately in
+//! `security_audit_tests`.
 
 mod common;
 
@@ -33,6 +34,7 @@ const CORPUS: &str = r#"
     @container (min-width: 1px) { .g { color: gold } }
     @layer base { .h { color: tan } }
     @starting-style { .i { color: cyan } }
+    @position-try --fallback { background-image: url('position.png') }
     .j { background-image: image-set(url('a.png') 1x, url('b.png') 2x) }
     .k { width: var(--x, url('var.png')) }
 "#;

@@ -7,10 +7,11 @@
 //!
 //! The policy interface is **deny-by-default**: every hook that admits content
 //! drops it unless the policy explicitly keeps it, and the engine independently
-//! enforces a value guard so that exfiltration vectors such as `url()`, `var()`,
-//! and `env()` can never leak — even through `@font-face` `src`, `var()`
-//! fallbacks, or tokens recovered from malformed input — unless the policy opts
-//! into them. Forgetting a hook fails safe by over-removing rather than leaking.
+//! enforces a value/resource guard so that exfiltration vectors such as `url()`,
+//! `src()`, string-based image functions, `@import`, `var()`, and `env()` cannot
+//! leak unless the policy opts into them. Generic functions in raw/unparsed
+//! values also fail closed unless explicitly allowed. Forgetting a hook fails
+//! safe by over-removing rather than leaking.
 //!
 //! Use [`StrictPolicy`] for a ready-made allowlist policy, or implement
 //! [`CssSanitizationPolicy`] for full control.
@@ -101,8 +102,8 @@ mod sanitize;
 pub use lightningcss;
 pub use options::SanitizeOptions;
 pub use policy::{
-    CssSanitizationPolicy, DescriptorContext, NodeAction, PropertyContext, RuleContext,
-    SelectorContext, ValueAction, ValueContext, ValueLocation,
+    CssSanitizationPolicy, DescriptorContext, NodeAction, PropertyContext, ResourceKind,
+    ResourceRef, RuleContext, SelectorContext, ValueAction, ValueContext, ValueLocation,
 };
 pub use preset::StrictPolicy;
 pub use sanitize::{

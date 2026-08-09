@@ -4,18 +4,19 @@ use std::collections::{HashMap, HashSet};
 
 use lightningcss::printer::PrinterOptions;
 use lightningcss::properties::Property;
-use lightningcss::properties::custom::{EnvironmentVariable, Token, TokenOrValue, Variable};
+use lightningcss::properties::custom::{
+    EnvironmentVariable, Function, Token, TokenOrValue, Variable,
+};
 use lightningcss::rules::CssRule;
 use lightningcss::rules::font_face::FontFaceProperty;
 use lightningcss::rules::font_palette_values::FontPaletteValuesProperty;
 use lightningcss::rules::view_transition::ViewTransitionProperty;
 use lightningcss::selector::SelectorList;
 use lightningcss::stylesheet::ParserOptions;
-use lightningcss::values::url::Url;
 
 use crate::policy::{
-    CssSanitizationPolicy, DescriptorContext, NodeAction, PropertyContext, SelectorContext,
-    ValueAction, ValueContext,
+    CssSanitizationPolicy, DescriptorContext, NodeAction, PropertyContext, ResourceRef,
+    SelectorContext, ValueAction, ValueContext,
 };
 
 /// A strict, allowlist-based [`CssSanitizationPolicy`].
@@ -23,9 +24,10 @@ use crate::policy::{
 /// Everything is removed unless explicitly allowed. Normal style rules, nesting
 /// rules, and nested declaration blocks are always structurally permitted (their
 /// declarations are still filtered); all other at-rules must be allowed by name.
-/// Properties are allowed by name, and the value-bearing constructs `url()`,
-/// `var()`, and `env()` must each be opted into. `!important` declarations are
-/// dropped unless [`allow_important`](Self::allow_important) is set.
+/// Properties are allowed by name. Fetchable resources, `var()`, `env()`, and
+/// generic functions in raw/unparsed values must be opted into separately.
+/// `!important` declarations are dropped unless
+/// [`allow_important`](Self::allow_important) is set.
 ///
 /// ```
 /// use css_sanitizer::{clean_stylesheet_with_policy, StrictPolicy};
@@ -43,6 +45,7 @@ pub struct StrictPolicy {
     allowed_properties: HashSet<String>,
     allowed_rules: HashSet<String>,
     allowed_values: HashMap<String, HashSet<String>>,
+    allowed_functions: HashSet<String>,
     allow_important: bool,
     allow_url: bool,
     allow_var: bool,
@@ -75,19 +78,26 @@ impl StrictPolicy {
         self
     }
 
-    /// Allows `url()` values.
+    /// Allows all recognized fetchable resources: typed/raw `url()`, `src()`,
+    /// string-based `image()`/`image-set()`, and URLs in allowed `@import`
+    /// rules. Use a custom policy's `check_resource` hook when origin- or
+    /// scheme-specific decisions are required.
     pub fn allow_url(mut self) -> Self {
         self.allow_url = true;
         self
     }
 
-    /// Allows `var()` references.
+    /// Allows `var()` references. Outside a recognized resource wrapper, this
+    /// trusts the computed value supplied by the external cascade; the
+    /// sanitizer does not resolve custom properties across stylesheet/DOM
+    /// boundaries.
     pub fn allow_var(mut self) -> Self {
         self.allow_var = true;
         self
     }
 
-    /// Allows `env()` references.
+    /// Allows `env()` references. Outside a recognized resource wrapper, this
+    /// trusts the computed value supplied by the user-agent/environment.
     pub fn allow_env(mut self) -> Self {
         self.allow_env = true;
         self
@@ -97,6 +107,29 @@ impl StrictPolicy {
     pub fn allow_values(mut self, property: &str, values: &[&str]) -> Self {
         let entry = self.allowed_values.entry(property.to_string()).or_default();
         entry.extend(values.iter().map(|v| v.to_string()));
+        self
+    }
+
+    /// Allows generic functions found in raw/unparsed values. Known resource
+    /// functions such as `src()` and `image()` are controlled by
+    /// [`allow_url`](Self::allow_url) instead. Case/escape variants of `var()`
+    /// and `env()` remain controlled by [`allow_var`](Self::allow_var) and
+    /// [`allow_env`](Self::allow_env). Dashed custom function names are
+    /// case-sensitive; other CSS function names are ASCII case-insensitive.
+    ///
+    /// Allowing an arbitrary-substitution function (for example a dashed custom
+    /// function or `if()`) trusts its computed result when the function appears
+    /// outside a recognized resource wrapper. An external `@function`
+    /// definition cannot be resolved statically by this sanitizer.
+    pub fn allow_functions(mut self, functions: &[&str]) -> Self {
+        self.allowed_functions
+            .extend(functions.iter().map(|function| {
+                if function.starts_with("--") {
+                    (*function).to_string()
+                } else {
+                    function.to_ascii_lowercase()
+                }
+            }));
         self
     }
 
@@ -137,6 +170,7 @@ impl StrictPolicy {
             CssRule::Nesting(_) => "nesting",
             CssRule::NestedDeclarations(_) => "nested-declarations",
             CssRule::Viewport(_) => "viewport",
+            CssRule::PositionTry(_) => "position-try",
             CssRule::CustomMedia(_) => "custom-media",
             CssRule::LayerStatement(_) => "layer-statement",
             CssRule::LayerBlock(_) => "layer-block",
@@ -152,6 +186,13 @@ impl StrictPolicy {
     }
 
     fn rule_allowed(&self, rule: &CssRule<'_>) -> bool {
+        if matches!(
+            rule,
+            CssRule::Ignored | CssRule::Unknown(_) | CssRule::Custom(_)
+        ) {
+            return false;
+        }
+
         matches!(
             rule,
             CssRule::Style(_) | CssRule::Nesting(_) | CssRule::NestedDeclarations(_)
@@ -161,16 +202,6 @@ impl StrictPolicy {
 
 impl CssSanitizationPolicy for StrictPolicy {
     fn visit_rule(&self, rule: &mut CssRule<'_>, _ctx: crate::policy::RuleContext) -> NodeAction {
-        // `@import`/`@namespace`/`@moz-document` can fetch external resources,
-        // so they additionally require url permission.
-        if matches!(
-            rule,
-            CssRule::Import(_) | CssRule::Namespace(_) | CssRule::MozDocument(_)
-        ) && !self.allow_url
-        {
-            return NodeAction::Drop;
-        }
-
         if self.rule_allowed(rule) {
             NodeAction::Continue
         } else {
@@ -234,8 +265,27 @@ impl CssSanitizationPolicy for StrictPolicy {
         NodeAction::Continue
     }
 
-    fn check_url(&self, _url: &Url<'_>, _ctx: ValueContext) -> ValueAction {
+    fn check_resource(&self, _resource: ResourceRef<'_>, _ctx: ValueContext) -> ValueAction {
         if self.allow_url {
+            ValueAction::Allow
+        } else {
+            ValueAction::Deny
+        }
+    }
+
+    fn check_function(&self, function: &Function<'_>, _ctx: ValueContext) -> ValueAction {
+        if function.name.0.eq_ignore_ascii_case("expression") {
+            return ValueAction::Deny;
+        }
+
+        let name = function.name.0.as_ref();
+        let allowed = if name.starts_with("--") {
+            self.allowed_functions.contains(name)
+        } else {
+            self.allowed_functions.contains(&name.to_ascii_lowercase())
+        };
+
+        if allowed {
             ValueAction::Allow
         } else {
             ValueAction::Deny
@@ -262,23 +312,31 @@ impl CssSanitizationPolicy for StrictPolicy {
         }
     }
 
+    fn check_unparsed_variable(&self, _function: &Function<'_>, _ctx: ValueContext) -> ValueAction {
+        if self.allow_var {
+            ValueAction::Allow
+        } else {
+            ValueAction::Deny
+        }
+    }
+
+    fn check_unparsed_environment_variable(
+        &self,
+        _function: &Function<'_>,
+        _ctx: ValueContext,
+    ) -> ValueAction {
+        if self.allow_env {
+            ValueAction::Allow
+        } else {
+            ValueAction::Deny
+        }
+    }
+
     fn check_token(&self, token: &TokenOrValue<'_>, _ctx: ValueContext) -> ValueAction {
         match token {
-            // Raw url tokens recovered from malformed input are url values.
-            TokenOrValue::Token(Token::UnquotedUrl(_)) | TokenOrValue::Token(Token::BadUrl(_)) => {
-                if self.allow_url {
-                    ValueAction::Allow
-                } else {
-                    ValueAction::Deny
-                }
-            }
+            TokenOrValue::Token(Token::BadUrl(_) | Token::Function(_)) => ValueAction::Deny,
             // Legacy IE `expression()` is never legitimate; always reject.
             TokenOrValue::Function(f) if f.name.0.eq_ignore_ascii_case("expression") => {
-                ValueAction::Deny
-            }
-            TokenOrValue::Token(Token::Function(name))
-                if name.eq_ignore_ascii_case("expression") =>
-            {
                 ValueAction::Deny
             }
             // Other tokens carry no fetch capability on their own; nested values

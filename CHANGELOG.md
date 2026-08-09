@@ -5,6 +5,39 @@ All notable changes to css-sanitizer will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-08-09
+
+### Changed (breaking)
+
+- `NodeAction::Skip` no longer bypasses descendant sanitization or an enabled engine value/resource guard. It remains in the API for compatibility and now has the same traversal semantics as `Continue` after the policy hook returns.
+- Generic functions in raw/unparsed values now fail closed. `StrictPolicy::allow_functions()` can explicitly admit named non-resource functions; legacy `expression()` remains unconditionally denied.
+- Updated the public AST dependency to `lightningcss 1.0.0-alpha.72`. AST API signatures and the benchmark parser options were adapted to the upstream lifetime change.
+
+### Added
+
+- Added the shared deny-by-default `check_resource(ResourceRef, ValueContext)` hook and public `ResourceKind`/`ResourceRef` types. It covers typed/raw `url()`, CSS Values `src()`, string-based `image()`/`image-set()`, dynamic resource references, and `@import` URLs.
+- Added `check_function()` and `StrictPolicy::allow_functions()` for explicit handling of generic functions that `lightningcss` leaves in raw/unparsed values.
+- Added deny-by-default normalization hooks for case/escape variants of `var()` and `env()` that alpha.72 leaves as generic functions.
+- Added `@position-try` rule and declaration traversal for the rule variant introduced by `lightningcss` alpha.72.
+
+### Fixed
+
+- Closed semantic resource bypasses where `src("...")`, `image("...")`, string-based `image-set()`, and case/escape variants such as `URL("...")` were represented as generic functions rather than typed URLs by `lightningcss`.
+- Reserved generic `VAR()`/`ENV()` variants for the existing variable/environment permissions and treated them recursively as dynamic resources inside image functions, preventing `allow_functions()` from bypassing resource checks.
+- Treat unresolved generic functions inside generic `image()`/`image-set()` syntax as dynamic resource candidates, covering CSS Values 5 `if()` and dashed custom functions without a future function-name allowlist gap.
+- Kept `@import` resource decisions inside the same engine-enforced guard as declaration resources. `@namespace` URI identifiers are no longer incorrectly treated as fetches.
+- Unknown/custom at-rule categories cannot be enabled through `StrictPolicy::allow_rules()`.
+
+### Notes
+
+- `StrictPolicy::allow_url()` now admits every recognized resource kind. Custom policies should use `check_resource()` for origin-, scheme-, or kind-specific decisions.
+- Existing custom `check_url()` overrides remain authoritative for typed URLs. Remove or delegate that override when migrating all resource decisions to `check_resource()`.
+- Existing custom policies must implement the new unparsed variable/environment hooks if they want to preserve case/escape variants of `var()`/`env()`; the default behavior is safe removal.
+- `ResourceRef::value` is decoded but unresolved and may be relative. `ResourceKind::Url` also represents image-set options that lightningcss normalizes into typed URL images; `ResourceKind::ImageSet` covers generic/unparsed string and dynamic forms.
+- Dashed custom function allowlist entries are case-sensitive; standard CSS function entries remain ASCII case-insensitive.
+- `allow_functions()` trusts the computed result of explicitly allowed arbitrary-substitution functions outside recognized resource wrappers, just as `allow_var()` trusts values supplied through external cascade boundaries. External `@function` definitions are not resolved by this crate.
+- No input-size or parser-resource limit was added; `max_depth` continues to bound only sanitizer traversal.
+
 ## [0.3.0] - 2026-06-26
 
 ### Changed (breaking)

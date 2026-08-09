@@ -1,8 +1,8 @@
 use crate::guard;
 use crate::options::SanitizeOptions;
 use crate::policy::{
-    CssSanitizationPolicy, DescriptorContext, NodeAction, PropertyContext, RuleContext,
-    SelectorContext, ValueContext, ValueLocation,
+    CssSanitizationPolicy, DescriptorContext, NodeAction, PropertyContext, ResourceKind,
+    ResourceRef, RuleContext, SelectorContext, ValueAction, ValueContext, ValueLocation,
 };
 use lightningcss::declaration::DeclarationBlock;
 use lightningcss::printer::{Printer, PrinterOptions};
@@ -34,6 +34,7 @@ enum PropertyLocation {
     PageMargin,
     CounterStyle,
     Viewport,
+    PositionTry,
 }
 
 impl PropertyLocation {
@@ -47,6 +48,7 @@ impl PropertyLocation {
             PropertyLocation::PageMargin => ValueLocation::PageMargin,
             PropertyLocation::CounterStyle => ValueLocation::CounterStyle,
             PropertyLocation::Viewport => ValueLocation::Viewport,
+            PropertyLocation::PositionTry => ValueLocation::PositionTry,
         }
     }
 }
@@ -78,6 +80,7 @@ fn is_rule_empty(rule: &CssRule<'_>) -> bool {
         }
         CssRule::NestedDeclarations(rule) => rule.declarations.is_empty(),
         CssRule::Viewport(rule) => rule.declarations.is_empty(),
+        CssRule::PositionTry(rule) => rule.declarations.is_empty(),
         CssRule::LayerBlock(rule) => rule.rules.0.is_empty(),
         CssRule::Container(rule) => rule.rules.0.is_empty(),
         CssRule::Scope(rule) => rule.rules.0.is_empty(),
@@ -137,12 +140,14 @@ impl<'p> Engine<'p> {
                     self.policy.visit_counter_style_property(property, ctx)
                 }
                 PropertyLocation::Viewport => self.policy.visit_viewport_property(property, ctx),
+                PropertyLocation::PositionTry => {
+                    self.policy.visit_position_try_property(property, ctx)
+                }
             };
 
             match action {
                 NodeAction::Drop => false,
-                NodeAction::Skip => true,
-                NodeAction::Continue => {
+                NodeAction::Skip | NodeAction::Continue => {
                     !self.opts.enforce_value_guard
                         || guard::property_allowed(
                             property,
@@ -237,13 +242,14 @@ impl<'p> Engine<'p> {
         });
     }
 
-    /// Shared keep/drop logic for descriptor properties: `Drop` removes, `Skip`
-    /// keeps without value scanning, `Continue` keeps subject to the value guard.
+    /// Shared keep/drop logic for descriptor properties. Engine value/resource
+    /// guards apply equally to `Skip` and `Continue` when enabled.
     fn descriptor_kept(&self, action: NodeAction, value_guard: impl FnOnce() -> bool) -> bool {
         match action {
             NodeAction::Drop => false,
-            NodeAction::Skip => true,
-            NodeAction::Continue => !self.opts.enforce_value_guard || value_guard(),
+            NodeAction::Skip | NodeAction::Continue => {
+                !self.opts.enforce_value_guard || value_guard()
+            }
         }
     }
 
@@ -267,8 +273,7 @@ impl<'p> Engine<'p> {
 
             match self.policy.visit_page_margin_rule(rule, ctx) {
                 NodeAction::Drop => false,
-                NodeAction::Skip => !rule.declarations.is_empty(),
-                NodeAction::Continue => {
+                NodeAction::Skip | NodeAction::Continue => {
                     self.sanitize_declaration_block_inner(
                         &mut rule.declarations,
                         PropertyLocation::PageMargin,
@@ -364,16 +369,14 @@ impl<'p> Engine<'p> {
             CssRule::FontFeatureValues(rule) => {
                 match self.policy.visit_font_feature_values_rule(rule, ctx) {
                     NodeAction::Drop => return false,
-                    NodeAction::Skip => {}
-                    NodeAction::Continue => {
+                    NodeAction::Skip | NodeAction::Continue => {
                         self.sanitize_font_feature_values_subrules(rule, ctx.depth + 1);
                     }
                 }
             }
             CssRule::Page(rule) => match self.policy.visit_page_rule(rule, ctx) {
                 NodeAction::Drop => return false,
-                NodeAction::Skip => {}
-                NodeAction::Continue => {
+                NodeAction::Skip | NodeAction::Continue => {
                     self.sanitize_declaration_block_inner(
                         &mut rule.declarations,
                         PropertyLocation::Page,
@@ -387,8 +390,7 @@ impl<'p> Engine<'p> {
             }
             CssRule::CounterStyle(rule) => match self.policy.visit_counter_style_rule(rule, ctx) {
                 NodeAction::Drop => return false,
-                NodeAction::Skip => {}
-                NodeAction::Continue => {
+                NodeAction::Skip | NodeAction::Continue => {
                     self.sanitize_declaration_block_inner(
                         &mut rule.declarations,
                         PropertyLocation::CounterStyle,
@@ -424,8 +426,7 @@ impl<'p> Engine<'p> {
             }
             CssRule::Viewport(rule) => match self.policy.visit_viewport_rule(rule, ctx) {
                 NodeAction::Drop => return false,
-                NodeAction::Skip => {}
-                NodeAction::Continue => {
+                NodeAction::Skip | NodeAction::Continue => {
                     self.sanitize_declaration_block_inner(
                         &mut rule.declarations,
                         PropertyLocation::Viewport,
@@ -433,6 +434,13 @@ impl<'p> Engine<'p> {
                     );
                 }
             },
+            CssRule::PositionTry(rule) => {
+                self.sanitize_declaration_block_inner(
+                    &mut rule.declarations,
+                    PropertyLocation::PositionTry,
+                    ctx.depth + 1,
+                );
+            }
             CssRule::LayerBlock(rule) => self.sanitize_rule_list(&mut rule.rules.0, ctx.depth + 1),
             CssRule::Container(rule) => {
                 // The `@container` prelude can embed declarations inside style
@@ -493,8 +501,24 @@ impl<'p> Engine<'p> {
                     return false;
                 }
             }
-            CssRule::Import(_)
-            | CssRule::Namespace(_)
+            CssRule::Import(rule) => {
+                if self.opts.enforce_value_guard
+                    && matches!(
+                        self.policy.check_resource(
+                            ResourceRef::literal(ResourceKind::Import, rule.url.as_ref()),
+                            ValueContext {
+                                depth: ctx.depth + 1,
+                                important: false,
+                                location: ValueLocation::ImportRule,
+                            },
+                        ),
+                        ValueAction::Deny
+                    )
+                {
+                    return false;
+                }
+            }
+            CssRule::Namespace(_)
             | CssRule::CustomMedia(_)
             | CssRule::LayerStatement(_)
             | CssRule::Ignored
@@ -518,8 +542,7 @@ impl<'p> Engine<'p> {
 
             match self.policy.visit_rule(rule, ctx) {
                 NodeAction::Drop => false,
-                NodeAction::Skip => !is_rule_empty(rule),
-                NodeAction::Continue => {
+                NodeAction::Skip | NodeAction::Continue => {
                     self.sanitize_rule_contents(rule, ctx) && !is_rule_empty(rule)
                 }
             }
@@ -550,7 +573,7 @@ pub fn sanitize_declaration_block_ast_with_options(
 
 /// Sanitizes a parsed stylesheet AST in place using default options.
 pub fn sanitize_stylesheet_ast(
-    stylesheet: &mut StyleSheet<'_, '_>,
+    stylesheet: &mut StyleSheet<'_>,
     policy: &dyn CssSanitizationPolicy,
 ) {
     sanitize_stylesheet_ast_with_options(stylesheet, policy, SanitizeOptions::default());
@@ -558,7 +581,7 @@ pub fn sanitize_stylesheet_ast(
 
 /// Sanitizes a parsed stylesheet AST in place with custom options.
 pub fn sanitize_stylesheet_ast_with_options(
-    stylesheet: &mut StyleSheet<'_, '_>,
+    stylesheet: &mut StyleSheet<'_>,
     policy: &dyn CssSanitizationPolicy,
     options: SanitizeOptions,
 ) {

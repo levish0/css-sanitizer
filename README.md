@@ -5,16 +5,17 @@ Policy-driven CSS sanitization on top of [lightningcss](https://lightningcss.dev
 This crate exposes `lightningcss` directly and lets you sanitize rules, selectors,
 properties, and descriptors through a custom policy trait. The policy interface is
 **deny-by-default**: an empty policy removes everything, and the engine independently
-enforces a value guard so exfiltration vectors such as `url()`, `var()`, and `env()`
-cannot leak. Even through `@font-face` `src`, `image-set()`, `var()` fallbacks, or
-tokens recovered from malformed input unless the policy opts into them. A built-in
-`StrictPolicy` allowlist is provided as a safe starting point.
+enforces a value/resource guard so exfiltration vectors such as `url()`, `src()`,
+string-based image functions, `@import`, `var()`, and `env()` cannot leak unless the
+policy opts into them. Generic functions in raw/unparsed values also fail closed
+unless explicitly allowed. A built-in `StrictPolicy` allowlist is provided as a
+safe starting point.
 
 ## Install
 
 ```toml
 [dependencies]
-css-sanitizer = "0.3.0"
+css-sanitizer = "0.4.0"
 ```
 
 ## Example
@@ -33,9 +34,9 @@ cargo run --example sanitize_strings
 - `lightningcss` is re-exported so callers can work against the same AST types.
 
 Every hook that admits content is **deny-by-default** (`NodeAction::Drop`), and the
-value-guard hooks (`check_url`, `check_variable`, `check_environment_variable`,
-`check_token`) default to `ValueAction::Deny`. Forgetting a hook fails safe by
-over-removing rather than leaking content.
+value-guard hooks (`check_resource`, `check_url`, `check_function`, variable and
+environment-variable hooks, and `check_token`) default to `ValueAction::Deny`.
+Forgetting a hook fails safe by over-removing rather than leaking content.
 
 ## Quick start (built-in strict policy)
 
@@ -129,11 +130,13 @@ The built-in walker already handles:
 - `@page` and page margin rules
 - `@counter-style`
 - `@viewport`
+- `@position-try`
 - selector lists on style-like rules, including `@scope` prelude (`scope_start`/`scope_end`) selectors
 - normal properties and `!important` declarations
 - descriptor-style nodes exposed by `lightningcss`
 - `@container` style query conditions and `@property` `initial-value`
-- a value guard over every kept declaration and descriptor that reaches `url()`, `var()`, `env()`, `image-set()` images, and raw tokens
+- a value/resource guard over every kept declaration and descriptor that reaches `url()`, `src()`, string-based `image()`/`image-set()`, `var()`, `env()`, generic functions, and raw tokens
+- explicit resource checks for URLs in kept `@import` rules
 
 Empty rules created by filtering are removed during traversal. Rules nested deeper than
 `SanitizeOptions::max_depth` (default 256) are dropped to bound the sanitizer's recursion.
@@ -147,7 +150,7 @@ Empty rules created by filtering are removed during traversal. Rules nested deep
 
 - `StrictPolicy`
 - `CssSanitizationPolicy`
-- `NodeAction`, `ValueAction`
+- `NodeAction`, `ValueAction`, `ResourceKind`, `ResourceRef`
 - `RuleContext`, `SelectorContext`, `PropertyContext`, `DescriptorContext`, `ValueContext`, `ValueLocation`
 - `SanitizeOptions`
 - `sanitize_declaration_block_ast()` / `sanitize_declaration_block_ast_with_options()`
@@ -159,10 +162,19 @@ Empty rules created by filtering are removed during traversal. Rules nested deep
 ## Security notes
 
 - The policy is deny-by-default: anything not explicitly allowed is removed, so forgetting a hook fails safe.
-- The engine-enforced value guard means `url()`, `var()`, and `env()` cannot leak unless the policy allows them, regardless of which structural hooks are overridden. This covers `@font-face` `src`, `image-set()`, `var()`/`env()` fallbacks, and raw `url()` tokens recovered from malformed input.
-- Selector scoping, `@import`, remote URLs, and `!important` are policy decisions; `StrictPolicy` denies all of them unless opted in.
-- `NodeAction::Skip` keeps a node but bypasses deeper sanitization (including the value guard) for its children; avoid it in a strict policy.
-- `var(--x)` still cannot be resolved statically across external cascade boundaries unless your own policy or environment model provides that information.
+- The engine-enforced guard means syntactically identifiable fetchable resources cannot leak unless the policy allows them, regardless of which structural hooks are overridden. It covers typed/raw `url()`, CSS Values `src()`, string-based `image()`/`image-set()`, `@import`, and dynamic references inside recognized resource wrappers, plus nested `var()`/`env()` fallbacks.
+- `StrictPolicy::allow_url()` is intentionally broad: it admits all recognized resource kinds. Implement `check_resource` in a custom policy for scheme, origin, or resource-kind restrictions.
+- For compatibility, a custom `check_url()` override remains authoritative for typed `url()` values. New custom policies should centralize resource decisions in `check_resource()`; existing policies can delegate their `check_url()` implementation to it when migrating.
+- Generic functions in raw/unparsed values are denied by default. `StrictPolicy::allow_functions()` admits named non-resource functions; known resource functions remain controlled by `allow_url()`.
+- Any unresolved generic function nested inside generic `image()`/`image-set()` syntax is treated as a dynamic resource candidate. This covers current and future arbitrary-substitution functions such as `if()` and dashed custom functions; both the function and resource permissions are required.
+- Dashed custom function names in `allow_functions()` are matched case-sensitively, while standard CSS function names are matched ASCII case-insensitively.
+- `allow_functions()` trusts the computed result of an explicitly allowed arbitrary-substitution function when it appears outside a recognized resource wrapper. For example, an external `@function --asset()` can make `background-image: --asset()` resolve to a URL without a syntactic URL in the sanitized fragment. Only allow such functions when their external definitions/results are trusted.
+- Case/escape variants of `var()` and `env()` that lightningcss leaves generic are reserved and still use their dedicated deny-by-default hooks; they cannot be enabled through `allow_functions()`.
+- Existing custom policies that want to preserve those case/escape variants must implement `check_unparsed_variable()` and `check_unparsed_environment_variable()` in addition to their typed variable hooks; otherwise the variants are safely removed.
+- Selector scoping and `!important` are policy decisions. `StrictPolicy` allows parsed selectors by default and denies `!important` unless opted in, so callers that need selector isolation must implement selector hooks or scope CSS outside this crate.
+- `NodeAction::Skip` is retained for API compatibility, but it no longer bypasses recursive sanitization or an enabled value/resource guard. `SanitizeOptions::with_value_guard(false)` is the explicit, dangerous opt-out.
+- `ResourceRef::value` is parser-decoded but unresolved and may be relative; `None` also covers resources that cannot be recovered statically. Origin-restricting custom policies must resolve literals against their own trusted base URL. `ResourceKind::Url` also includes image-set options that lightningcss normalizes to typed URLs.
+- `var(--x)` and externally defined arbitrary-substitution/custom functions cannot be resolved statically across cascade and stylesheet boundaries unless your own policy or environment model provides that information.
 
 ## Publishing
 
