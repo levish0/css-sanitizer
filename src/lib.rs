@@ -1,114 +1,49 @@
-//! # css-sanitizer
+//! Typed, policy-driven CSS sanitization on top of `lightningcss`.
 //!
-//! Policy-driven CSS sanitization on top of `lightningcss`.
+//! The engine is deny-by-default at both structural and value levels. A custom
+//! [`CssPolicy`] receives typed rule, selector, property, descriptor, resource,
+//! and dynamic-value context. [`StrictPolicy`] is only a convenience preset; it
+//! is not required for full policy control.
 //!
-//! This crate exposes `lightningcss` and lets you sanitize parsed CSS AST nodes
-//! directly through [`CssSanitizationPolicy`].
-//!
-//! The policy interface is **deny-by-default**: every hook that admits content
-//! drops it unless the policy explicitly keeps it, and the engine independently
-//! enforces a value/resource guard so that exfiltration vectors such as `url()`,
-//! `src()`, string-based image functions, `@import`, `var()`, and `env()` cannot
-//! leak unless the policy opts into them. Generic functions in raw/unparsed
-//! values also fail closed unless explicitly allowed. Forgetting a hook fails
-//! safe by over-removing rather than leaking.
-//!
-//! Use [`StrictPolicy`] for a ready-made allowlist policy, or implement
-//! [`CssSanitizationPolicy`] for full control.
-//!
-//! ## String API (built-in strict policy)
+//! String entry points return [`Result`] plus a [`SanitizeReport`]. Parsing is
+//! preceded by byte and nesting limits so pathological input is rejected before
+//! recursive upstream parser paths run. [`SanitizedCss`] is CSS text, not HTML;
+//! use [`SanitizedCss::to_style_element_text`] before interpolating into an HTML
+//! `<style>` raw-text context.
 //!
 //! ```rust
-//! use css_sanitizer::{clean_stylesheet_with_policy, StrictPolicy};
+//! use css_sanitizer::{sanitize_declaration_list, StrictPolicy};
 //!
-//! let safe = clean_stylesheet_with_policy(
-//!     "@import url('evil.css'); .card { color: red; position: fixed }",
+//! let output = sanitize_declaration_list(
+//!     "color: red; position: fixed",
 //!     &StrictPolicy::new().allow_properties(&["color"]),
-//! );
+//! ).unwrap();
 //!
-//! assert!(!safe.contains("@import"));
-//! assert!(safe.contains("color"));
-//! assert!(!safe.contains("position"));
-//! ```
-//!
-//! ## Custom policy
-//!
-//! Because the trait is deny-by-default, a custom policy must allow each kind of
-//! node it wants to keep — including selectors and value kinds.
-//!
-//! ```rust
-//! use css_sanitizer::{
-//!     clean_stylesheet_with_policy, CssSanitizationPolicy, NodeAction, PropertyContext,
-//!     SelectorContext, ValueAction,
-//! };
-//! use css_sanitizer::lightningcss::properties::Property;
-//! use css_sanitizer::lightningcss::rules::CssRule;
-//! use css_sanitizer::lightningcss::selector::SelectorList;
-//!
-//! struct ColorOnly;
-//!
-//! impl CssSanitizationPolicy for ColorOnly {
-//!     fn visit_rule(&self, rule: &mut CssRule<'_>, _ctx: css_sanitizer::RuleContext) -> NodeAction {
-//!         match rule {
-//!             CssRule::Style(_) => NodeAction::Continue,
-//!             _ => NodeAction::Drop,
-//!         }
-//!     }
-//!
-//!     fn visit_selector_list(&self, _s: &mut SelectorList<'_>, _c: SelectorContext) -> NodeAction {
-//!         NodeAction::Continue
-//!     }
-//!
-//!     fn visit_property(&self, property: &mut Property<'_>, _ctx: PropertyContext) -> NodeAction {
-//!         if property.property_id().name() == "color" {
-//!             NodeAction::Continue
-//!         } else {
-//!             NodeAction::Drop
-//!         }
-//!     }
-//! }
-//!
-//! let safe = clean_stylesheet_with_policy(".card { color: red; position: fixed }", &ColorOnly);
-//! assert!(safe.contains("color"));
-//! assert!(!safe.contains("position"));
-//! ```
-//!
-//! ## AST API
-//!
-//! ```rust
-//! use css_sanitizer::{sanitize_stylesheet_ast, StrictPolicy};
-//! use css_sanitizer::lightningcss::stylesheet::{ParserOptions, StyleSheet};
-//!
-//! let mut stylesheet =
-//!     StyleSheet::parse("@import url('evil.css'); .card { color: blue }", ParserOptions::default())
-//!         .expect("stylesheet should parse");
-//!
-//! sanitize_stylesheet_ast(&mut stylesheet, &StrictPolicy::new().allow_properties(&["color"]));
-//!
-//! let output = stylesheet
-//!     .to_css(Default::default())
-//!     .expect("stylesheet should serialize")
-//!     .code;
-//! assert!(!output.contains("@import"));
-//! assert!(output.contains(".card"));
+//! assert!(output.css.as_str().contains("color"));
+//! assert!(!output.css.as_str().contains("position"));
 //! ```
 
 mod guard;
 mod options;
+mod output;
 mod policy;
 mod preset;
 mod sanitize;
 
 pub use lightningcss;
-pub use options::SanitizeOptions;
+pub use options::{ParseLimits, SanitizeOptions};
+pub use output::{SanitizeError, SanitizeOutput, SanitizeReport, SanitizedCss};
 pub use policy::{
-    CssSanitizationPolicy, DescriptorContext, NodeAction, PropertyContext, ResourceKind,
-    ResourceRef, RuleContext, SelectorContext, ValueAction, ValueContext, ValueLocation,
+    CssPolicy, DescriptorContext, DescriptorKind, DynamicValueKind, DynamicValueRef,
+    FontFaceDescriptorKind, FontPaletteValuesDescriptorKind, ImportContext, ImportDecision,
+    NodeDecision, PropertyContext, PropertyLocation, ResourceRef, ResourceSyntax, ResourceUse,
+    RuleContext, RuleKind, SelectorContext, SelectorLocation, ValueContext, ValueDecision,
+    ViewTransitionDescriptorKind,
 };
 pub use preset::StrictPolicy;
 pub use sanitize::{
-    clean_declaration_list_with_policy, clean_declaration_list_with_policy_and_options,
-    clean_stylesheet_with_policy, clean_stylesheet_with_policy_and_options,
     sanitize_declaration_block_ast, sanitize_declaration_block_ast_with_options,
+    sanitize_declaration_list, sanitize_declaration_list_with_options, sanitize_stylesheet,
     sanitize_stylesheet_ast, sanitize_stylesheet_ast_with_options,
+    sanitize_stylesheet_with_options,
 };

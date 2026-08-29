@@ -4,90 +4,88 @@ use css_sanitizer::lightningcss::properties::Property;
 use css_sanitizer::lightningcss::rules::CssRule;
 use css_sanitizer::lightningcss::selector::{Component, SelectorList};
 use css_sanitizer::{
-    CssSanitizationPolicy, NodeAction, PropertyContext, RuleContext, SelectorContext,
+    CssPolicy, NodeDecision, PropertyContext, RuleContext, RuleKind, SanitizeOutput,
+    SelectorContext, StrictPolicy, ValueContext, ValueDecision, sanitize_declaration_list,
+    sanitize_stylesheet,
 };
 
-/// The built-in strict allowlist policy, re-exported for tests.
-pub use css_sanitizer::StrictPolicy;
+pub fn declaration(input: &str, policy: &dyn CssPolicy) -> SanitizeOutput {
+    sanitize_declaration_list(input, policy).expect("declaration list should sanitize")
+}
 
-/// In the deny-by-default model `StrictPolicy` already gates `url()`, `var()`,
-/// and `env()` via its value-guard hooks, so the function-security tests reuse
-/// it directly.
-pub type FunctionSecurityPolicy = StrictPolicy;
+pub fn declaration_css(input: &str, policy: &dyn CssPolicy) -> String {
+    declaration(input, policy).css.into_string()
+}
 
-/// Allows normal style rules and their declarations, but drops any rule whose
-/// selector list references the global `html` element.
+pub fn stylesheet(input: &str, policy: &dyn CssPolicy) -> SanitizeOutput {
+    sanitize_stylesheet(input, policy).expect("stylesheet should sanitize")
+}
+
+pub fn stylesheet_css(input: &str, policy: &dyn CssPolicy) -> String {
+    stylesheet(input, policy).css.into_string()
+}
+
+pub fn style_policy(properties: &[&str]) -> StrictPolicy {
+    StrictPolicy::new()
+        .allow_unscoped_selectors()
+        .allow_properties(properties)
+}
+
+/// Test-only policy that retains all typed style declarations but no resources
+/// or dynamic substitutions.
 pub struct NoGlobalSelectors;
 
-impl CssSanitizationPolicy for NoGlobalSelectors {
-    fn visit_rule(&self, rule: &mut CssRule<'_>, _ctx: RuleContext) -> NodeAction {
-        if matches!(rule, CssRule::Style(_)) {
-            NodeAction::Continue
+impl CssPolicy for NoGlobalSelectors {
+    fn rule(&self, _rule: &mut CssRule<'_>, context: RuleContext) -> NodeDecision {
+        if matches!(context.kind, RuleKind::Style | RuleKind::Scope) {
+            NodeDecision::Keep
         } else {
-            NodeAction::Drop
+            NodeDecision::Drop
         }
     }
 
-    fn visit_property(&self, _property: &mut Property<'_>, _ctx: PropertyContext) -> NodeAction {
-        NodeAction::Continue
+    fn property(&self, _property: &mut Property<'_>, _ctx: PropertyContext<'_>) -> NodeDecision {
+        NodeDecision::Keep
     }
 
-    fn visit_selector_list(
-        &self,
-        selectors: &mut SelectorList<'_>,
-        _ctx: SelectorContext,
-    ) -> NodeAction {
-        let has_global_html_selector = selectors.0.iter().any(|selector| {
+    fn selector(&self, selectors: &mut SelectorList<'_>, _ctx: SelectorContext) -> NodeDecision {
+        let has_html = selectors.0.iter().any(|selector| {
             selector.iter_raw_match_order().any(|component| {
-                matches!(
-                    component,
-                    Component::LocalName(name) if name.lower_name.0 == "html"
-                )
+                matches!(component, Component::LocalName(name) if name.lower_name.0 == "html")
             })
         });
-
-        if has_global_html_selector {
-            NodeAction::Drop
+        if has_html {
+            NodeDecision::Drop
         } else {
-            NodeAction::Continue
-        }
-    }
-}
-
-/// Allows normal style rules and their declarations, but drops `@import`.
-pub struct DropImports;
-
-impl CssSanitizationPolicy for DropImports {
-    fn visit_rule(&self, rule: &mut CssRule<'_>, _ctx: RuleContext) -> NodeAction {
-        match rule {
-            CssRule::Import(_) => NodeAction::Drop,
-            CssRule::Style(_) => NodeAction::Continue,
-            _ => NodeAction::Drop,
+            NodeDecision::Keep
         }
     }
 
-    fn visit_property(&self, _property: &mut Property<'_>, _ctx: PropertyContext) -> NodeAction {
-        NodeAction::Continue
-    }
-
-    fn visit_selector_list(
+    fn token(
         &self,
-        _selectors: &mut SelectorList<'_>,
-        _ctx: SelectorContext,
-    ) -> NodeAction {
-        NodeAction::Continue
+        _token: &css_sanitizer::lightningcss::properties::custom::TokenOrValue<'_>,
+        _ctx: &ValueContext<'_>,
+    ) -> ValueDecision {
+        ValueDecision::Allow
     }
 }
 
-/// Allows declarations, but drops `!important` ones.
 pub struct DropImportant;
 
-impl CssSanitizationPolicy for DropImportant {
-    fn visit_property(&self, _property: &mut Property<'_>, ctx: PropertyContext) -> NodeAction {
-        if ctx.important {
-            NodeAction::Drop
+impl CssPolicy for DropImportant {
+    fn property(&self, _property: &mut Property<'_>, context: PropertyContext<'_>) -> NodeDecision {
+        if context.important {
+            NodeDecision::Drop
         } else {
-            NodeAction::Continue
+            NodeDecision::Keep
         }
+    }
+
+    fn token(
+        &self,
+        _token: &css_sanitizer::lightningcss::properties::custom::TokenOrValue<'_>,
+        _ctx: &ValueContext<'_>,
+    ) -> ValueDecision {
+        ValueDecision::Allow
     }
 }

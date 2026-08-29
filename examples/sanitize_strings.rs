@@ -2,72 +2,56 @@ use css_sanitizer::lightningcss::properties::Property;
 use css_sanitizer::lightningcss::rules::CssRule;
 use css_sanitizer::lightningcss::selector::SelectorList;
 use css_sanitizer::{
-    CssSanitizationPolicy, NodeAction, PropertyContext, RuleContext, SelectorContext,
-    clean_declaration_list_with_policy, clean_stylesheet_with_policy,
+    CssPolicy, NodeDecision, PropertyContext, RuleContext, RuleKind, SelectorContext,
+    sanitize_declaration_list, sanitize_stylesheet,
 };
 
-struct DemoPolicy;
+struct ColorOnly;
 
-impl DemoPolicy {
-    // Only the property name and `!important` are decided here. Values such as
-    // `url()`/`expression()` are handled by the engine-enforced value guard,
-    // whose `check_*` hooks are deny-by-default and are not overridden below.
-    fn allow_property(property: &Property<'_>, important: bool) -> bool {
-        if important {
-            return false;
-        }
-
-        let property_id = property.property_id();
-        matches!(
-            property_id.name(),
-            "color" | "background-color" | "font-size"
-        )
-    }
-}
-
-impl CssSanitizationPolicy for DemoPolicy {
-    fn visit_rule(&self, rule: &mut CssRule<'_>, _ctx: RuleContext) -> NodeAction {
-        match rule {
-            CssRule::Style(_) => NodeAction::Continue,
-            _ => NodeAction::Drop,
+impl CssPolicy for ColorOnly {
+    fn rule(&self, _rule: &mut CssRule<'_>, context: RuleContext) -> NodeDecision {
+        if context.kind == RuleKind::Style {
+            NodeDecision::Keep
+        } else {
+            NodeDecision::Drop
         }
     }
 
-    fn visit_selector_list(
+    fn selector(
         &self,
         _selectors: &mut SelectorList<'_>,
-        _ctx: SelectorContext,
-    ) -> NodeAction {
-        NodeAction::Continue
+        _context: SelectorContext,
+    ) -> NodeDecision {
+        NodeDecision::Keep
     }
 
-    fn visit_property(&self, property: &mut Property<'_>, ctx: PropertyContext) -> NodeAction {
-        if Self::allow_property(property, ctx.important) {
-            NodeAction::Continue
+    fn property(&self, _property: &mut Property<'_>, context: PropertyContext<'_>) -> NodeDecision {
+        if context.key.name() == "color" && !context.important {
+            NodeDecision::Keep
         } else {
-            NodeAction::Drop
+            NodeDecision::Drop
         }
     }
 }
 
-fn main() {
-    let inline_input =
-        "color: red; position: fixed; background-image: url(evil.png); font-size: 14px";
-    let inline_output = clean_declaration_list_with_policy(inline_input, &DemoPolicy);
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let declarations =
+        sanitize_declaration_list("color: rebeccapurple; position: fixed", &ColorOnly)?;
+    println!("{}", declarations.css);
+    println!(
+        "dropped declarations: {}",
+        declarations.report.dropped_declarations
+    );
 
-    let stylesheet_input = r#"
-        @import url("evil.css");
-        .card {
-            color: red;
-            position: fixed;
-            background-color: white !important;
-            font-size: 14px;
-        }
-    "#;
-    let stylesheet_output = clean_stylesheet_with_policy(stylesheet_input, &DemoPolicy);
+    let stylesheet = sanitize_stylesheet(
+        ".card { color: rebeccapurple; position: fixed }",
+        &ColorOnly,
+    )?;
+    println!("{}", stylesheet.css);
+    println!(
+        "HTML style text: {}",
+        stylesheet.css.to_style_element_text()
+    );
 
-    println!("Inline input:\n{inline_input}\n");
-    println!("Inline output:\n{inline_output}\n");
-    println!("Stylesheet input:\n{stylesheet_input}\n");
-    println!("Stylesheet output:\n{stylesheet_output}");
+    Ok(())
 }

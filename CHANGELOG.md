@@ -5,6 +5,44 @@ All notable changes to css-sanitizer will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-08-30
+
+### Changed (breaking)
+
+- Replaced `CssSanitizationPolicy` with the smaller deny-by-default `CssPolicy` contract. Policies receive the original lightningcss AST plus typed sanitizer context; the old hook names and compatibility aliases were removed.
+- Replaced `NodeAction`/`ValueAction` with `NodeDecision`/`ValueDecision`. The unchecked `Skip` state no longer exists.
+- Replaced string rule allowlists with exhaustive `RuleKind` values. `RuleKind::of()` matches every `CssRule` variant in lightningcss alpha.72 so upstream additions require an explicit sanitizer review.
+- Replaced `ResourceKind` with separate `ResourceSyntax` and semantic `ResourceUse` classifications. Image, font source, cursor, list marker, generated content, mask, filter, SVG paint-server, and other permissions can be controlled independently.
+- Replaced `allow_url()`, `allow_var()`, and `allow_env()` with explicit `allow_resources()`, `allow_variables()`, and `allow_environment_variables()` capabilities.
+- Replaced the infallible `clean_*` string functions with `sanitize_declaration_list()` and `sanitize_stylesheet()`, returning `Result<SanitizeOutput, SanitizeError>` and a `SanitizeReport`.
+- `StrictPolicy` no longer permits unscoped selectors by default. Stylesheet callers must opt into `allow_unscoped_selectors()` or implement selector inspection/rewriting themselves.
+- `SanitizeOptions` now has explicit parse/input/output limits, parser flags, strict parsing, traversal depth, and the clearly named `dangerously_disable_value_guard()` escape hatch.
+
+### Added
+
+- Added property-, descriptor-, rule-, location-, depth-, and `!important`-aware value context. Resource and dynamic-value decisions can distinguish the exact use site.
+- Added typed descriptor allowlists for `@font-face`, `@font-palette-values`, and `@view-transition`, plus explicit page-margin and font-feature-values subrule capabilities.
+- Added a dedicated `ImportDecision` hook. `@import` can no longer be enabled by any general resource permission; `StrictPolicy::dangerously_allow_passthrough_imports()` documents that remote contents are not sanitized.
+- Added `ParseLimits` with default 1 MiB input/output budgets and a pre-parser delimiter-nesting limit of 128. Known selector/function/rule nesting shapes that can abort lightningcss alpha.72 are rejected before parsing.
+- Added parser feature-flag support and an opt-in strict parsing mode for string APIs.
+- Added `SanitizedCss::to_style_element_text()` for HTML `<style>` raw-text serialization, including case-insensitive end-tag escaping.
+- Added count-based sanitization reports for dropped rules, selector lists, declarations, descriptors, and value rejections.
+
+### Fixed
+
+- `@import` no longer bypasses selector, property, descriptor, or at-rule policy through a remotely loaded unsanitized stylesheet under a generic URL permission.
+- Unknown at-rule prelude and block tokens now cross the engine value/resource guard when a custom policy retains the rule. The default uninspectable `CssRule::Custom` payload is always removed.
+- `@font-face src: local()` is denied by `StrictPolicy` unless a separate local-font capability is enabled.
+- Standard property configuration is ASCII-case-insensitive while custom properties and dashed custom functions remain case-sensitive.
+- Value/resource context is recomputed after structural policy rewrites so the guard observes the retained property or descriptor kind.
+- Container style queries, property-registration initial values, nested rules, page margins, position-try declarations, and descriptor values remain recursively guarded under the redesigned API.
+
+### Security notes
+
+- The pre-parser nesting check mitigates the known alpha.72 recursion shapes but is not a parser sandbox. Upstream [lightningcss issue #1297](https://github.com/parcel-bundler/lightningcss/issues/1297) remains open.
+- Passthrough imports are intentionally dangerous: this crate does not fetch, redirect-check, limit, or sanitize remote stylesheets.
+- Selector isolation, host-name namespacing, URL base resolution, redirect validation, and cross-cascade dynamic-value resolution remain caller-owned boundaries.
+
 ## [0.4.0] - 2026-08-09
 
 ### Changed (breaking)

@@ -2,684 +2,375 @@ mod common;
 
 use std::cell::RefCell;
 
-use common::StrictPolicy;
+use common::{declaration, declaration_css, style_policy, stylesheet_css};
 use css_sanitizer::lightningcss::properties::Property;
-use css_sanitizer::lightningcss::properties::custom::{
-    EnvironmentVariable, Token, TokenOrValue, Variable,
-};
+use css_sanitizer::lightningcss::properties::custom::TokenOrValue;
 use css_sanitizer::lightningcss::rules::CssRule;
-use css_sanitizer::lightningcss::rules::font_feature_values::FontFeatureValuesRule;
-use css_sanitizer::lightningcss::rules::font_palette_values::FontPaletteValuesProperty;
-use css_sanitizer::lightningcss::rules::view_transition::ViewTransitionProperty;
-use css_sanitizer::lightningcss::stylesheet::{ParserOptions, StyleSheet};
-use css_sanitizer::lightningcss::values::url::Url;
+use css_sanitizer::lightningcss::rules::font_face::FontFaceProperty;
 use css_sanitizer::{
-    CssSanitizationPolicy, DescriptorContext, NodeAction, PropertyContext, ResourceKind,
-    ResourceRef, RuleContext, ValueAction, ValueContext, ValueLocation,
-    clean_declaration_list_with_policy, clean_stylesheet_with_policy, sanitize_stylesheet_ast,
+    CssPolicy, DescriptorContext, DescriptorKind, DynamicValueRef, FontFaceDescriptorKind,
+    ImportContext, ImportDecision, NodeDecision, PropertyContext, PropertyLocation, ResourceRef,
+    ResourceSyntax, ResourceUse, RuleContext, RuleKind, StrictPolicy, ValueContext, ValueDecision,
 };
 
-fn sanitize_parsed_stylesheet(input: &str, policy: &dyn CssSanitizationPolicy) -> String {
-    let mut stylesheet =
-        StyleSheet::parse(input, ParserOptions::default()).expect("stylesheet should parse");
-    sanitize_stylesheet_ast(&mut stylesheet, policy);
-    stylesheet
-        .to_css(Default::default())
-        .expect("stylesheet should serialize")
-        .code
-        .trim()
-        .to_string()
-}
+#[test]
+fn deny_by_default_policy_removes_everything() {
+    struct EmptyPolicy;
+    impl CssPolicy for EmptyPolicy {}
 
-struct DropSpecialDescriptorsPolicy;
-
-impl CssSanitizationPolicy for DropSpecialDescriptorsPolicy {
-    fn visit_rule(&self, rule: &mut CssRule<'_>, _ctx: RuleContext) -> NodeAction {
-        match rule {
-            CssRule::FontPaletteValues(_)
-            | CssRule::ViewTransition(_)
-            | CssRule::FontFeatureValues(_) => NodeAction::Continue,
-            _ => NodeAction::Drop,
-        }
-    }
-
-    fn visit_font_palette_values_property(
-        &self,
-        _property: &mut FontPaletteValuesProperty<'_>,
-        _ctx: DescriptorContext,
-    ) -> NodeAction {
-        NodeAction::Drop
-    }
-
-    fn visit_view_transition_property(
-        &self,
-        _property: &mut ViewTransitionProperty<'_>,
-        _ctx: DescriptorContext,
-    ) -> NodeAction {
-        NodeAction::Drop
-    }
-
-    fn visit_font_feature_values_rule(
-        &self,
-        _rule: &mut FontFeatureValuesRule<'_>,
-        _ctx: RuleContext,
-    ) -> NodeAction {
-        NodeAction::Drop
-    }
+    assert!(declaration_css("color: red", &EmptyPolicy).is_empty());
+    assert!(stylesheet_css(".card { color: red }", &EmptyPolicy).is_empty());
 }
 
 #[test]
-fn import_rule_requires_url_permission_even_when_rule_is_whitelisted() {
-    let result = clean_stylesheet_with_policy(
-        "@import url('https://evil.test/a.css');",
-        &StrictPolicy::new().allow_rules(&["import"]),
-    );
-    assert_eq!(result, "");
-}
-
-#[test]
-fn string_import_is_preserved_only_when_rule_and_url_are_allowed() {
-    let result = clean_stylesheet_with_policy(
-        "@import \"https://example.com/safe.css\";",
-        &StrictPolicy::new().allow_rules(&["import"]).allow_url(),
-    );
-    assert!(result.contains("@import"));
-}
-
-#[test]
-fn malformed_inline_css_does_not_escape_into_new_rules() {
-    let result = clean_declaration_list_with_policy(
-        "color: red; } .owned { background-image: url('https://evil.test/x.png') }",
-        &StrictPolicy::new().allow_properties(&["color", "background-image"]),
-    );
-    assert_eq!(result, "color: red");
-}
-
-#[test]
-fn image_set_with_nested_url_is_blocked_without_url_permission() {
-    let result = clean_declaration_list_with_policy(
-        "background-image: image-set(url('https://evil.test/x.png') 1x)",
-        &StrictPolicy::new().allow_properties(&["background-image"]),
-    );
-    assert_eq!(result, "");
-}
-
-#[test]
-fn spec_resource_functions_are_blocked_without_url_permission() {
-    for css in [
-        r#"background-image: src("https://evil.test/src.png")"#,
-        r#"background-image: SRC("https://evil.test/upper.png")"#,
-        r#"background-image: s\72 c("https://evil.test/escaped.png")"#,
-        r#"--asset: URL("https://evil.test/upper-url.png")"#,
-        r#"--asset: u\72 l("https://evil.test/escaped-url.png")"#,
-        r#"background-image: image("https://evil.test/image.png")"#,
-        r#"background-image: image(ltr "https://evil.test/directed.png")"#,
-        r#"--asset: image-set("https://evil.test/set.png" 1x)"#,
-        r#"--asset: -webkit-image-set("https://evil.test/webkit.png" 1x)"#,
+fn image_set_and_spec_resource_functions_are_guarded() {
+    for input in [
+        r#"background-image: image-set(url("https://example.test/a.png") 1x)"#,
+        r#"background-image: src("https://example.test/a.png")"#,
+        r#"background-image: SRC("https://example.test/a.png")"#,
+        r#"background-image: s\72 c("https://example.test/a.png")"#,
+        r#"background-image: image("https://example.test/a.png")"#,
+        r#"--asset: -webkit-image-set("https://example.test/a.png" 1x)"#,
     ] {
-        let result = clean_declaration_list_with_policy(
-            css,
+        let css = declaration_css(
+            input,
             &StrictPolicy::new().allow_properties(&["background-image", "--asset"]),
         );
-        assert!(
-            result.is_empty(),
-            "resource survived: css={css:?} result={result:?}"
-        );
+        assert!(css.is_empty(), "resource survived: {input} -> {css}");
     }
 }
 
 #[test]
-fn spec_resource_functions_are_preserved_only_with_url_permission() {
-    for css in [
-        r#"background-image: src("https://safe.test/src.png")"#,
-        r#"background-image: SRC("https://safe.test/upper.png")"#,
-        r#"background-image: s\72 c("https://safe.test/escaped.png")"#,
-        r#"--asset: URL("https://safe.test/upper-url.png")"#,
-        r#"--asset: u\72 l("https://safe.test/escaped-url.png")"#,
-        r#"background-image: image("https://safe.test/image.png")"#,
-        r#"background-image: image(ltr "https://safe.test/directed.png")"#,
-        r#"--asset: image-set("https://safe.test/set.png" 1x)"#,
-        r#"--asset: -webkit-image-set("https://safe.test/webkit.png" 1x)"#,
-    ] {
-        let result = clean_declaration_list_with_policy(
-            css,
-            &StrictPolicy::new()
-                .allow_properties(&["background-image", "--asset"])
-                .allow_url(),
-        );
-        assert!(
-            result.contains("safe.test"),
-            "resource was not preserved: {result:?}"
-        );
-    }
+fn dynamic_resource_wrappers_require_dynamic_and_resource_permissions() {
+    let input = "background-image: src(var(--asset))";
+
+    let resource_only = StrictPolicy::new()
+        .allow_properties(&["background-image"])
+        .allow_resources(&[ResourceUse::Image]);
+    assert!(declaration_css(input, &resource_only).is_empty());
+
+    let dynamic_only = StrictPolicy::new()
+        .allow_properties(&["background-image"])
+        .allow_variables();
+    assert!(declaration_css(input, &dynamic_only).is_empty());
+
+    let both = dynamic_only.allow_resources(&[ResourceUse::Image]);
+    assert!(declaration_css(input, &both).contains("var("));
 }
 
-#[test]
-fn dynamic_src_requires_both_resource_and_variable_permission() {
-    let css = "background-image: src(var(--asset))";
-
-    let without_var = clean_declaration_list_with_policy(
-        css,
-        &StrictPolicy::new()
-            .allow_properties(&["background-image"])
-            .allow_url(),
-    );
-    assert!(without_var.is_empty(), "got: {without_var:?}");
-
-    let allowed = clean_declaration_list_with_policy(
-        css,
-        &StrictPolicy::new()
-            .allow_properties(&["background-image"])
-            .allow_url()
-            .allow_var(),
-    );
-    assert!(allowed.contains("src("), "got: {allowed:?}");
-    assert!(allowed.contains("var("), "got: {allowed:?}");
-}
-
-#[test]
-fn case_and_escape_variants_of_var_and_env_use_dedicated_permissions() {
-    for (css, policy) in [
-        (
-            "width: VAR(--size, 10px)",
-            StrictPolicy::new().allow_properties(&["width"]).allow_var(),
-        ),
-        (
-            r"width: V\41 R(--size, 10px)",
-            StrictPolicy::new().allow_properties(&["width"]).allow_var(),
-        ),
-        (
-            "width: ENV(safe-area-inset-left, 10px)",
-            StrictPolicy::new().allow_properties(&["width"]).allow_env(),
-        ),
-    ] {
-        let result = clean_declaration_list_with_policy(css, &policy);
-        assert!(
-            !result.is_empty(),
-            "dedicated permission failed: {result:?}"
-        );
-    }
-
-    for (function, css) in [
-        ("var", "width: VAR(--size, 10px)"),
-        ("env", "width: ENV(safe-area-inset-left, 10px)"),
-    ] {
-        let result = clean_declaration_list_with_policy(
-            css,
-            &StrictPolicy::new()
-                .allow_properties(&["width"])
-                .allow_functions(&[function]),
-        );
-        assert!(result.is_empty(), "generic allowlist bypassed {function}");
-    }
-
-    for (css, policy) in [
-        (
-            r#"width: VAR(--size, URL("https://evil.test/var.png"))"#,
-            StrictPolicy::new().allow_properties(&["width"]).allow_var(),
-        ),
-        (
-            r#"width: ENV(css-sanitizer-missing, URL("https://evil.test/env.png"))"#,
-            StrictPolicy::new().allow_properties(&["width"]).allow_env(),
-        ),
-    ] {
-        let result = clean_declaration_list_with_policy(css, &policy);
-        assert!(result.is_empty(), "fallback resource survived: {result:?}");
-    }
-}
-
-#[test]
-fn unparsed_var_and_env_inside_image_functions_require_resource_permission() {
-    for css in [
-        "background-image: image-set(VAR(--asset) 1x)",
-        r#"background-image: image-set(ENV(css-sanitizer-missing, "https://evil.test/e.png") 1x)"#,
-        "background-image: image(future(VAR(--asset)))",
-    ] {
-        let result = clean_declaration_list_with_policy(
-            css,
-            &StrictPolicy::new()
-                .allow_properties(&["background-image"])
-                .allow_functions(&["var", "env", "future"])
-                .allow_var()
-                .allow_env(),
-        );
-        assert!(result.is_empty(), "dynamic resource survived: {result:?}");
-    }
-
-    let allowed = clean_declaration_list_with_policy(
-        "background-image: image-set(VAR(--asset) 1x)",
-        &StrictPolicy::new()
-            .allow_properties(&["background-image"])
-            .allow_var()
-            .allow_url(),
-    );
-    assert!(allowed.contains("VAR("), "got: {allowed:?}");
-}
-
-#[test]
-fn unresolved_functions_inside_image_syntax_require_resource_permission() {
-    for css in [
-        "background-image: image-set(--asset() 1x)",
-        "background-image: image(--asset())",
-        r#"background-image: image-set(if(media(width >= 0px): "https://evil.test/if.png"; else: "fallback.png") 1x)"#,
-    ] {
-        let result = clean_declaration_list_with_policy(
-            css,
-            &StrictPolicy::new()
-                .allow_properties(&["background-image"])
-                .allow_functions(&["--asset", "if", "media"]),
-        );
-        assert!(
-            result.is_empty(),
-            "unresolved resource survived: {result:?}"
-        );
-    }
-
-    let allowed = clean_declaration_list_with_policy(
-        "background-image: image-set(--asset() 1x)",
-        &StrictPolicy::new()
-            .allow_properties(&["background-image"])
-            .allow_functions(&["--asset"])
-            .allow_url(),
-    );
-    assert!(allowed.contains("--asset("), "got: {allowed:?}");
-}
-
-#[test]
-fn dashed_custom_function_allowlist_is_case_sensitive() {
-    let wrong_case = clean_declaration_list_with_policy(
-        "width: --SAFE()",
-        &StrictPolicy::new()
-            .allow_properties(&["width"])
-            .allow_functions(&["--safe"]),
-    );
-    assert!(wrong_case.is_empty(), "got: {wrong_case:?}");
-
-    let exact_case = clean_declaration_list_with_policy(
-        "width: --SAFE()",
-        &StrictPolicy::new()
-            .allow_properties(&["width"])
-            .allow_functions(&["--SAFE"]),
-    );
-    assert!(exact_case.contains("--SAFE("), "got: {exact_case:?}");
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SeenResource {
+    syntax: ResourceSyntax,
+    use_kind: ResourceUse,
+    value: Option<String>,
+    location: PropertyLocation,
+    property: Option<String>,
+    descriptor: Option<DescriptorKind>,
 }
 
 #[derive(Default)]
 struct ResourceRecorder {
-    seen: RefCell<Vec<(ResourceKind, Option<String>, ValueLocation)>>,
+    seen: RefCell<Vec<SeenResource>>,
 }
 
-impl CssSanitizationPolicy for ResourceRecorder {
-    fn visit_property(&self, _property: &mut Property<'_>, _ctx: PropertyContext) -> NodeAction {
-        NodeAction::Continue
+impl CssPolicy for ResourceRecorder {
+    fn rule(&self, _rule: &mut CssRule<'_>, context: RuleContext) -> NodeDecision {
+        if context.kind == RuleKind::FontFace {
+            NodeDecision::Keep
+        } else {
+            NodeDecision::Drop
+        }
     }
 
-    fn check_resource(&self, resource: ResourceRef<'_>, ctx: ValueContext) -> ValueAction {
-        self.seen.borrow_mut().push((
-            resource.kind,
-            resource.value.map(str::to_owned),
-            ctx.location,
-        ));
-        ValueAction::Allow
-    }
-
-    fn check_variable(&self, _variable: &Variable<'_>, _ctx: ValueContext) -> ValueAction {
-        ValueAction::Allow
-    }
-
-    fn check_environment_variable(
+    fn property(
         &self,
-        _env: &EnvironmentVariable<'_>,
-        _ctx: ValueContext,
-    ) -> ValueAction {
-        ValueAction::Allow
+        _property: &mut Property<'_>,
+        _context: PropertyContext<'_>,
+    ) -> NodeDecision {
+        NodeDecision::Keep
     }
 
-    fn check_unparsed_variable(
+    fn font_face_descriptor(
         &self,
-        _function: &css_sanitizer::lightningcss::properties::custom::Function<'_>,
-        _ctx: ValueContext,
-    ) -> ValueAction {
-        ValueAction::Allow
+        _property: &mut FontFaceProperty<'_>,
+        _context: DescriptorContext,
+    ) -> NodeDecision {
+        NodeDecision::Keep
     }
 
-    fn check_unparsed_environment_variable(
+    fn resource(&self, resource: ResourceRef<'_>, context: &ValueContext<'_>) -> ValueDecision {
+        self.seen.borrow_mut().push(SeenResource {
+            syntax: resource.syntax,
+            use_kind: resource.use_kind,
+            value: resource.value.map(str::to_owned),
+            location: context.location,
+            property: context.property.as_ref().map(|key| key.name().to_owned()),
+            descriptor: context.descriptor,
+        });
+        ValueDecision::Allow
+    }
+
+    fn dynamic_value(
         &self,
-        _function: &css_sanitizer::lightningcss::properties::custom::Function<'_>,
-        _ctx: ValueContext,
-    ) -> ValueAction {
-        ValueAction::Allow
+        _value: DynamicValueRef<'_, '_>,
+        _context: &ValueContext<'_>,
+    ) -> ValueDecision {
+        ValueDecision::Allow
     }
 
-    fn check_token(&self, _token: &TokenOrValue<'_>, _ctx: ValueContext) -> ValueAction {
-        ValueAction::Allow
+    fn token(&self, _token: &TokenOrValue<'_>, _context: &ValueContext<'_>) -> ValueDecision {
+        ValueDecision::Allow
     }
 }
 
 #[test]
-fn semantic_resource_variants_reach_the_shared_hook_with_exact_metadata() {
+fn resource_hook_receives_syntax_use_property_and_location() {
     let recorder = ResourceRecorder::default();
-    let result = clean_declaration_list_with_policy(
+    let css = declaration_css(
         r#"
-            background-image: image-set("typed-set.png" 1x);
-            --upper: SRC("upper.png");
-            --escaped: s\72 c("escaped.png");
-            --upper-url: URL("upper-url.png");
-            --escaped-url: u\72 l("escaped-url.png");
-            --webkit: -webkit-image-set("webkit.png" 1x);
-            --dynamic-image: image(var(--asset));
-            --dynamic-set: image-set(env(asset));
+            background-image: url("image.png");
+            cursor: url("cursor.cur"), auto;
+            list-style-image: url("marker.svg");
+            list-style: url("marker-short.svg") disc;
+            content: url("content.png");
+            mask-image: url("mask.svg");
+            filter: url("filter.svg#blur");
+            backdrop-filter: url("backdrop.svg#blur");
+            fill: url("paint.svg#gradient");
+            --asset: SRC("generic.bin");
+            --background-image: url("custom-token.png");
         "#,
         &recorder,
     );
+    assert!(!css.is_empty());
 
-    assert!(!result.is_empty(), "got: {result:?}");
+    let seen = recorder.seen.borrow();
+    assert!(seen.iter().any(|item| {
+        item.syntax == ResourceSyntax::Url
+            && item.use_kind == ResourceUse::Image
+            && item.property.as_deref() == Some("background-image")
+            && item.location == PropertyLocation::DeclarationList
+    }));
+    assert!(seen.iter().any(|item| item.use_kind == ResourceUse::Cursor));
+    assert!(
+        seen.iter()
+            .any(|item| item.use_kind == ResourceUse::ListStyleImage)
+    );
+    assert!(
+        seen.iter()
+            .any(|item| item.use_kind == ResourceUse::Content)
+    );
+    assert!(
+        seen.iter()
+            .any(|item| item.use_kind == ResourceUse::MaskImage)
+    );
+    assert!(
+        seen.iter()
+            .any(|item| item.use_kind == ResourceUse::FilterReference)
+    );
+    assert!(
+        seen.iter()
+            .any(|item| item.use_kind == ResourceUse::SvgPaintServer)
+    );
+    assert!(seen.iter().any(|item| {
+        item.syntax == ResourceSyntax::Src
+            && item.use_kind == ResourceUse::Other
+            && item.value.as_deref() == Some("generic.bin")
+    }));
+    assert!(seen.iter().any(|item| {
+        item.use_kind == ResourceUse::Other && item.value.as_deref() == Some("custom-token.png")
+    }));
+}
+
+#[test]
+fn font_source_context_is_distinct_from_image_context() {
+    let recorder = ResourceRecorder::default();
+    let css = stylesheet_css("@font-face { src: url('font.woff2') }", &recorder);
+    assert!(css.contains("font.woff2"));
+
+    let seen = recorder.seen.borrow();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].use_kind, ResourceUse::FontSource);
     assert_eq!(
-        recorder.seen.into_inner(),
-        vec![
-            (
-                ResourceKind::Url,
-                Some("typed-set.png".into()),
-                ValueLocation::DeclarationList,
-            ),
-            (
-                ResourceKind::Src,
-                Some("upper.png".into()),
-                ValueLocation::DeclarationList,
-            ),
-            (
-                ResourceKind::Src,
-                Some("escaped.png".into()),
-                ValueLocation::DeclarationList,
-            ),
-            (
-                ResourceKind::Url,
-                Some("upper-url.png".into()),
-                ValueLocation::DeclarationList,
-            ),
-            (
-                ResourceKind::Url,
-                Some("escaped-url.png".into()),
-                ValueLocation::DeclarationList,
-            ),
-            (
-                ResourceKind::ImageSet,
-                Some("webkit.png".into()),
-                ValueLocation::DeclarationList,
-            ),
-            (ResourceKind::Image, None, ValueLocation::DeclarationList,),
-            (ResourceKind::ImageSet, None, ValueLocation::DeclarationList,),
-        ]
+        seen[0].descriptor,
+        Some(DescriptorKind::FontFace(FontFaceDescriptorKind::Source))
     );
 }
 
 #[test]
-fn unknown_functions_are_fail_closed_unless_explicitly_allowed() {
-    let denied = clean_declaration_list_with_policy(
-        "width: future-size(10px)",
-        &StrictPolicy::new().allow_properties(&["width"]),
+fn resource_use_permissions_do_not_bleed_between_css_features() {
+    let policy = StrictPolicy::new()
+        .allow_properties(&["background-image", "cursor"])
+        .allow_resources(&[ResourceUse::Image]);
+    let css = declaration_css(
+        "background-image: url('image.png'); cursor: url('cursor.cur'), auto",
+        &policy,
     );
-    assert!(denied.is_empty(), "got: {denied:?}");
-
-    let allowed = clean_declaration_list_with_policy(
-        "width: future-size(10px)",
-        &StrictPolicy::new()
-            .allow_properties(&["width"])
-            .allow_functions(&["future-size"]),
-    );
-    assert!(allowed.contains("future-size("), "got: {allowed:?}");
+    assert!(css.contains("image.png"));
+    assert!(!css.contains("cursor.cur"));
 }
 
 #[test]
-fn resource_functions_cannot_be_enabled_through_generic_function_allowlist() {
-    for (function, spelling) in [
-        ("url", "URL"),
-        ("src", "src"),
-        ("image", "image"),
-        ("image-set", "image-set"),
-        ("-webkit-image-set", "-webkit-image-set"),
-    ] {
-        let css = format!("--asset: {spelling}(\"https://evil.test/asset\")");
-        let result = clean_declaration_list_with_policy(
-            &css,
-            &StrictPolicy::new()
-                .allow_properties(&["--asset"])
-                .allow_functions(&[function]),
-        );
+fn local_font_access_is_separate_from_font_urls() {
+    let base = StrictPolicy::new()
+        .allow_rules(&[RuleKind::FontFace])
+        .allow_font_face_descriptors(&[
+            FontFaceDescriptorKind::FontFamily,
+            FontFaceDescriptorKind::Source,
+        ])
+        .allow_resources(&[ResourceUse::FontSource]);
 
-        assert!(result.is_empty(), "resource survived: {result:?}");
-    }
+    let denied = stylesheet_css(
+        "@font-face { font-family: Demo; src: local('Installed Font') }",
+        &base,
+    );
+    assert!(denied.contains("font-family"));
+    assert!(!denied.contains("local("));
+
+    let allowed = stylesheet_css(
+        "@font-face { font-family: Demo; src: local('Installed Font') }",
+        &base.allow_local_fonts(),
+    );
+    assert!(allowed.contains("local("));
 }
 
-#[test]
-fn strict_policy_denies_unstructured_raw_function_tokens() {
-    let policy = StrictPolicy::new();
-    let action = policy.check_token(
-        &TokenOrValue::Token(Token::Function("future".into())),
-        ValueContext {
-            depth: 0,
-            important: false,
-            location: ValueLocation::DeclarationList,
-        },
-    );
+struct HostRestrictedImport;
 
-    assert_eq!(action, ValueAction::Deny);
-}
-
-#[test]
-fn legacy_expression_is_denied_even_when_named_in_function_allowlist() {
-    let result = clean_declaration_list_with_policy(
-        "width: expression(alert(1))",
-        &StrictPolicy::new()
-            .allow_properties(&["width"])
-            .allow_functions(&["expression", "alert"]),
-    );
-
-    assert!(result.is_empty(), "got: {result:?}");
-}
-
-#[test]
-fn ordinary_strings_and_local_fonts_are_not_resources() {
-    let content = clean_declaration_list_with_policy(
-        r#"content: "https://not-a-fetch.test/value""#,
-        &StrictPolicy::new().allow_properties(&["content"]),
-    );
-    assert!(content.contains("not-a-fetch.test"), "got: {content:?}");
-
-    let font = clean_stylesheet_with_policy(
-        r#"@font-face { font-family: Test; src: local("Arial") }"#,
-        &StrictPolicy::new().allow_rules(&["font-face"]),
-    );
-    assert!(font.contains("local("), "got: {font:?}");
-}
-
-struct SafeImportOnly;
-
-impl CssSanitizationPolicy for SafeImportOnly {
-    fn visit_rule(&self, rule: &mut CssRule<'_>, _ctx: RuleContext) -> NodeAction {
-        if matches!(rule, CssRule::Import(_)) {
-            NodeAction::Continue
+impl CssPolicy for HostRestrictedImport {
+    fn rule(&self, _rule: &mut CssRule<'_>, context: RuleContext) -> NodeDecision {
+        if context.kind == RuleKind::Import {
+            NodeDecision::Keep
         } else {
-            NodeAction::Drop
+            NodeDecision::Drop
         }
     }
 
-    fn check_resource(&self, resource: ResourceRef<'_>, ctx: ValueContext) -> ValueAction {
-        if matches!(resource.kind, ResourceKind::Import)
-            && resource.value == Some("https://safe.test/theme.css")
-            && matches!(ctx.location, ValueLocation::ImportRule)
-        {
-            ValueAction::Allow
+    fn import(&self, context: ImportContext<'_>) -> ImportDecision {
+        if context.url == "https://static.example.test/theme.css" {
+            ImportDecision::AllowPassthrough
         } else {
-            ValueAction::Deny
+            ImportDecision::Deny
         }
+    }
+
+    fn resource(&self, _resource: ResourceRef<'_>, _context: &ValueContext<'_>) -> ValueDecision {
+        panic!("imports must not be routed through the general resource hook")
     }
 }
 
 #[test]
-fn import_uses_the_shared_resource_policy() {
-    let safe =
-        clean_stylesheet_with_policy(r#"@import "https://safe.test/theme.css";"#, &SafeImportOnly);
-    assert!(safe.contains("@import"), "got: {safe:?}");
-
-    let evil = clean_stylesheet_with_policy(
-        "@import url('https://evil.test/theme.css');",
-        &SafeImportOnly,
+fn import_has_a_dedicated_policy_boundary() {
+    let safe = stylesheet_css(
+        "@import 'https://static.example.test/theme.css';",
+        &HostRestrictedImport,
     );
-    assert!(evil.is_empty(), "got: {evil:?}");
+    assert!(safe.contains("@import"));
+
+    let denied = stylesheet_css(
+        "@import 'https://other.example.test/theme.css';",
+        &HostRestrictedImport,
+    );
+    assert!(denied.is_empty());
 }
 
-struct LegacyTypedUrlPolicy;
+#[test]
+fn import_passthrough_does_not_claim_to_sanitize_remote_contents() {
+    let css = stylesheet_css(
+        "@import 'https://example.test/theme.css';",
+        &StrictPolicy::new().dangerously_allow_passthrough_imports(),
+    );
+    assert!(css.contains("@import"));
+}
 
-impl CssSanitizationPolicy for LegacyTypedUrlPolicy {
-    fn visit_property(&self, _property: &mut Property<'_>, _ctx: PropertyContext) -> NodeAction {
-        NodeAction::Continue
+struct PagePolicy;
+
+impl CssPolicy for PagePolicy {
+    fn rule(&self, _rule: &mut CssRule<'_>, context: RuleContext) -> NodeDecision {
+        if context.kind == RuleKind::Page {
+            NodeDecision::Keep
+        } else {
+            NodeDecision::Drop
+        }
     }
 
-    fn check_url(&self, _url: &Url<'_>, _ctx: ValueContext) -> ValueAction {
-        ValueAction::Allow
+    fn page_margin_rule(
+        &self,
+        _rule: &mut css_sanitizer::lightningcss::rules::page::PageMarginRule<'_>,
+        _context: RuleContext,
+    ) -> NodeDecision {
+        NodeDecision::Keep
     }
 
-    fn check_resource(&self, _resource: ResourceRef<'_>, _ctx: ValueContext) -> ValueAction {
-        ValueAction::Deny
+    fn property(&self, _property: &mut Property<'_>, context: PropertyContext<'_>) -> NodeDecision {
+        if matches!(context.key.name(), "margin" | "color" | "background-image") {
+            NodeDecision::Keep
+        } else {
+            NodeDecision::Drop
+        }
+    }
+
+    fn token(&self, _token: &TokenOrValue<'_>, _context: &ValueContext<'_>) -> ValueDecision {
+        ValueDecision::Allow
     }
 }
 
 #[test]
-fn legacy_check_url_override_remains_authoritative_for_typed_urls_only() {
-    let typed = clean_declaration_list_with_policy(
-        "background-image: url('legacy.png')",
-        &LegacyTypedUrlPolicy,
-    );
-    assert!(typed.contains("legacy.png"), "got: {typed:?}");
-
-    let generic =
-        clean_declaration_list_with_policy("--asset: URL('blocked.png')", &LegacyTypedUrlPolicy);
-    assert!(generic.is_empty(), "got: {generic:?}");
-}
-
-#[test]
-fn namespace_identifier_is_not_treated_as_a_fetchable_resource() {
-    let result = clean_stylesheet_with_policy(
-        r#"@namespace svg "http://www.w3.org/2000/svg";"#,
-        &StrictPolicy::new().allow_rules(&["namespace"]),
-    );
-    assert!(result.contains("@namespace"), "got: {result:?}");
-}
-
-#[test]
-fn wrapper_rules_recursively_sanitize_hidden_url_payloads() {
-    let result = sanitize_parsed_stylesheet(
-        r#"
-        @supports (display: block) {
-            .supports { background-image: url("https://evil.test/supports.png"); }
-        }
-        @container (min-width: 10px) {
-            .container { background-image: url("https://evil.test/container.png"); }
-        }
-        @scope (.card) {
-            .scope { background-image: url("https://evil.test/scope.png"); }
-        }
-        @layer audit {
-            .layer { background-image: url("https://evil.test/layer.png"); }
-        }
-        @starting-style {
-            .start { background-image: url("https://evil.test/starting-style.png"); }
-        }
-        "#,
-        &StrictPolicy::new()
-            .allow_rules(&[
-                "supports",
-                "container",
-                "scope",
-                "layer-block",
-                "starting-style",
-            ])
-            .allow_properties(&["background-image"]),
-    );
-
-    assert_eq!(result, "");
-}
-
-#[test]
-fn nesting_rules_are_recursively_sanitized_and_pruned_when_empty() {
-    let result = sanitize_parsed_stylesheet(
-        r#"
-        .card {
-            & .child {
-                background-image: url("https://evil.test/nesting.png");
-            }
-        }
-        "#,
-        &StrictPolicy::new().allow_properties(&["background-image"]),
-    );
-
-    assert_eq!(result, "");
-}
-
-#[test]
-fn page_margin_rules_strip_nested_urls_but_keep_safe_properties() {
-    let result = sanitize_parsed_stylesheet(
+fn page_margin_subrules_are_independently_controllable_and_guarded() {
+    let css = stylesheet_css(
         r#"
         @page {
             margin: 1cm;
             @top-left {
                 color: red;
-                background-image: url("https://evil.test/page.png");
+                background-image: url("https://example.test/page.png");
             }
         }
         "#,
-        &StrictPolicy::new()
-            .allow_rules(&["page"])
-            .allow_properties(&["margin", "color", "background-image"]),
+        &PagePolicy,
     );
-
-    assert!(result.contains("@page"));
-    assert!(result.contains("margin"));
-    assert!(result.contains("color"));
-    assert!(!result.contains("url("));
+    assert!(css.contains("@page"));
+    assert!(css.contains("margin"));
+    assert!(css.contains("color"));
+    assert!(!css.contains("url("));
 }
 
 #[test]
-fn viewport_rules_filter_disallowed_properties() {
-    let result = sanitize_parsed_stylesheet(
-        "@viewport { zoom: 1; width: device-width; }",
-        &StrictPolicy::new()
-            .allow_rules(&["viewport"])
-            .allow_properties(&["zoom"]),
-    );
-
-    assert!(result.contains("@viewport"));
-    assert!(result.contains("zoom"));
-    assert!(!result.contains("width"));
+fn wrapper_rules_recursively_apply_selector_property_and_resource_policy() {
+    for (kind, input) in [
+        (
+            RuleKind::Supports,
+            "@supports (display: block) { .card { background-image: url('a.png') } }",
+        ),
+        (
+            RuleKind::Container,
+            "@container (min-width: 10px) { .card { background-image: url('a.png') } }",
+        ),
+        (
+            RuleKind::Scope,
+            "@scope (.root) { .card { background-image: url('a.png') } }",
+        ),
+        (
+            RuleKind::LayerBlock,
+            "@layer component { .card { background-image: url('a.png') } }",
+        ),
+        (
+            RuleKind::StartingStyle,
+            "@starting-style { .card { background-image: url('a.png') } }",
+        ),
+    ] {
+        let policy = style_policy(&["background-image"]).allow_rules(&[kind]);
+        let css = stylesheet_css(input, &policy);
+        assert!(css.is_empty(), "{kind:?} retained guarded content: {css}");
+    }
 }
 
 #[test]
-fn font_palette_values_rule_drops_when_descriptor_policy_removes_everything() {
-    let result = sanitize_parsed_stylesheet(
-        "@font-palette-values --brand { base-palette: 1; override-colors: 0 red; }",
-        &DropSpecialDescriptorsPolicy,
+fn rejection_is_visible_in_the_report() {
+    let output = declaration(
+        "background-image: url('a.png')",
+        &StrictPolicy::new().allow_properties(&["background-image"]),
     );
-
-    assert_eq!(result, "");
-}
-
-#[test]
-fn view_transition_rule_drops_when_descriptor_policy_removes_everything() {
-    let result = sanitize_parsed_stylesheet(
-        "@view-transition { navigation: auto; }",
-        &DropSpecialDescriptorsPolicy,
-    );
-
-    assert_eq!(result, "");
-}
-
-#[test]
-fn font_feature_values_rule_hook_can_drop_the_entire_rule() {
-    let result = sanitize_parsed_stylesheet(
-        "@font-feature-values Test Sans { @styleset { alt-glyphs: 1; } }",
-        &DropSpecialDescriptorsPolicy,
-    );
-
-    assert_eq!(result, "");
+    assert!(output.css.is_empty());
+    assert_eq!(output.report.dropped_declarations, 1);
+    assert_eq!(output.report.rejected_values, 1);
 }

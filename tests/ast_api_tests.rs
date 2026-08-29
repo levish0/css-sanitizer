@@ -1,94 +1,84 @@
 mod common;
 
-use common::{DropImportant, DropImports, NoGlobalSelectors};
+use common::{DropImportant, NoGlobalSelectors, declaration_css, stylesheet_css};
 use css_sanitizer::lightningcss::rules::CssRule;
 use css_sanitizer::lightningcss::rules::font_feature_values::{
     FontFeatureSubrule, FontFeatureSubruleType,
 };
 use css_sanitizer::lightningcss::stylesheet::{ParserOptions, StyleSheet};
-use css_sanitizer::{
-    CssSanitizationPolicy, NodeAction, RuleContext, clean_declaration_list_with_policy,
-    clean_stylesheet_with_policy, sanitize_stylesheet_ast,
-};
+use css_sanitizer::{CssPolicy, NodeDecision, RuleContext, RuleKind, sanitize_stylesheet_ast};
 
 struct DropSwashSubrules;
 
-impl CssSanitizationPolicy for DropSwashSubrules {
-    fn visit_rule(&self, rule: &mut CssRule<'_>, _ctx: RuleContext) -> NodeAction {
-        if matches!(rule, CssRule::FontFeatureValues(_)) {
-            NodeAction::Continue
+impl CssPolicy for DropSwashSubrules {
+    fn rule(&self, _rule: &mut CssRule<'_>, context: RuleContext) -> NodeDecision {
+        if context.kind == RuleKind::FontFeatureValues {
+            NodeDecision::Keep
         } else {
-            NodeAction::Drop
+            NodeDecision::Drop
         }
     }
 
-    fn visit_font_feature_values_subrule(
+    fn font_feature_values_subrule(
         &self,
         subrule: &mut FontFeatureSubrule<'_>,
         _ctx: RuleContext,
-    ) -> NodeAction {
+    ) -> NodeDecision {
         if matches!(subrule.name, FontFeatureSubruleType::Swash) {
-            NodeAction::Drop
+            NodeDecision::Drop
         } else {
-            NodeAction::Continue
+            NodeDecision::Keep
         }
     }
 }
 
 #[test]
 fn custom_policy_can_drop_selector_lists() {
-    let result = clean_stylesheet_with_policy(
+    let css = stylesheet_css(
         "html { color: red } .card { color: blue }",
         &NoGlobalSelectors,
     );
-    assert!(!result.contains("html"));
-    assert!(result.contains(".card"));
+    assert!(!css.contains("html"));
+    assert!(css.contains(".card"));
 }
 
 #[test]
-fn custom_policy_can_drop_rules_on_parsed_ast() {
+fn custom_policy_can_filter_important_declarations() {
+    let css = declaration_css("color: red !important; width: 10px", &DropImportant);
+    assert!(!css.contains("!important"));
+    assert!(css.contains("width"));
+}
+
+#[test]
+fn ast_policy_receives_typed_rule_kinds() {
     let mut stylesheet = StyleSheet::parse(
-        "@import url('evil.css'); .card { color: blue }",
+        "@import url('https://example.test/a.css'); .card { color: blue }",
         ParserOptions::default(),
     )
     .expect("stylesheet should parse");
 
-    sanitize_stylesheet_ast(&mut stylesheet, &DropImports);
-
-    let result = stylesheet
+    let report = sanitize_stylesheet_ast(&mut stylesheet, &NoGlobalSelectors);
+    let css = stylesheet
         .to_css(Default::default())
         .expect("stylesheet should serialize")
         .code;
-    assert!(!result.contains("@import"));
-    assert!(result.contains(".card"));
+    assert!(!css.contains("@import"));
+    assert!(css.contains(".card"));
+    assert_eq!(report.dropped_rules, 1);
 }
 
 #[test]
-fn custom_policy_can_drop_important_declarations() {
-    let result =
-        clean_declaration_list_with_policy("color: red !important; width: 10px", &DropImportant);
-    assert!(!result.contains("!important"));
-    assert!(result.contains("width"));
-}
-
-#[test]
-fn custom_policy_can_filter_font_feature_values_subrules() {
-    let result = clean_stylesheet_with_policy(
+fn custom_policy_can_filter_font_feature_subrules() {
+    let css = stylesheet_css(
         "@font-feature-values Demo { @styleset { alt: 1; } @swash { fancy: 2; } }",
         &DropSwashSubrules,
     );
+    assert!(css.contains("@styleset"));
+    assert!(!css.contains("@swash"));
 
-    assert!(result.contains("@font-feature-values"));
-    assert!(result.contains("@styleset"));
-    assert!(!result.contains("@swash"));
-}
-
-#[test]
-fn custom_policy_drops_empty_font_feature_values_rule_after_filtering_subrules() {
-    let result = clean_stylesheet_with_policy(
+    let empty = stylesheet_css(
         "@font-feature-values Demo { @swash { fancy: 2; } }",
         &DropSwashSubrules,
     );
-
-    assert!(result.is_empty());
+    assert!(empty.is_empty());
 }
