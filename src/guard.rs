@@ -6,7 +6,8 @@
 //! tokens are visited recursively; generic resource functions that upstream
 //! leaves unparsed (`src()`, string-based `image()`/`image-set()`) are recognized
 //! explicitly. Each value is checked against the policy's deny-by-default
-//! `check_*` hooks, so value-level exfiltration cannot leak merely because a
+//! resource, dynamic-value, and token hooks, so value-level exfiltration cannot
+//! leak merely because a
 //! structural policy forgot a hook.
 
 use lightningcss::properties::Property;
@@ -21,37 +22,41 @@ use lightningcss::values::syntax::ParsedComponent;
 use lightningcss::values::url::Url;
 use lightningcss::visitor::{Visit, VisitTypes, Visitor};
 
-use crate::policy::{CssSanitizationPolicy, ResourceKind, ResourceRef, ValueAction, ValueContext};
+use crate::policy::{
+    CssPolicy, DynamicValueRef, ResourceRef, ResourceSyntax, ResourceUse, ValueContext,
+    ValueDecision,
+};
 
 /// Sentinel error used to short-circuit the `Visit` traversal as soon as a value
 /// is denied. The `?` operator unwinds the entire `node.visit(..)` call.
 struct Denied;
 
-struct ValueGuard<'a> {
-    policy: &'a dyn CssSanitizationPolicy,
-    ctx: ValueContext,
+struct ValueGuard<'a, 'i> {
+    policy: &'a dyn CssPolicy,
+    ctx: ValueContext<'i>,
 }
 
-impl<'a> ValueGuard<'a> {
-    fn act(action: ValueAction) -> Result<(), Denied> {
+impl<'a, 'i> ValueGuard<'a, 'i> {
+    fn act(action: ValueDecision) -> Result<(), Denied> {
         match action {
-            ValueAction::Allow => Ok(()),
-            ValueAction::Deny => Err(Denied),
+            ValueDecision::Allow => Ok(()),
+            ValueDecision::Deny => Err(Denied),
         }
     }
 
-    fn check_resource(&self, kind: ResourceKind, value: Option<&str>) -> Result<(), Denied> {
+    fn check_resource(&self, syntax: ResourceSyntax, value: Option<&str>) -> Result<(), Denied> {
+        let use_kind = ResourceUse::from_value_context(&self.ctx);
         let resource = match value {
-            Some(value) => ResourceRef::literal(kind, value),
-            None => ResourceRef::dynamic(kind),
+            Some(value) => ResourceRef::literal(syntax, use_kind, value),
+            None => ResourceRef::dynamic(syntax, use_kind),
         };
-        Self::act(self.policy.check_resource(resource, self.ctx))
+        Self::act(self.policy.resource(resource, &self.ctx))
     }
 
     fn check_function_resources(
         &self,
         function: &Function<'_>,
-        kind: ResourceKind,
+        syntax: ResourceSyntax,
         always_resource: bool,
     ) -> Result<(), Denied> {
         let mut found_resource = false;
@@ -61,7 +66,7 @@ impl<'a> ValueGuard<'a> {
             match argument {
                 TokenOrValue::Token(Token::String(value)) => {
                     found_resource = true;
-                    self.check_resource(kind, Some(value.as_ref()))?;
+                    self.check_resource(syntax, Some(value.as_ref()))?;
                 }
                 argument if Self::is_unresolved_resource_candidate(argument) => {
                     found_dynamic = true;
@@ -71,7 +76,7 @@ impl<'a> ValueGuard<'a> {
         }
 
         if found_dynamic || (always_resource && !found_resource) {
-            self.check_resource(kind, None)?;
+            self.check_resource(syntax, None)?;
         }
 
         Ok(())
@@ -89,7 +94,7 @@ impl<'a> ValueGuard<'a> {
         )
     }
 
-    fn visit_generic_function(&mut self, function: &mut Function<'_>) -> Result<(), Denied> {
+    fn visit_generic_function(&mut self, function: &mut Function<'i>) -> Result<(), Denied> {
         let name = function.name.0.as_ref();
 
         if name.eq_ignore_ascii_case("url") {
@@ -97,31 +102,37 @@ impl<'a> ValueGuard<'a> {
             // lower-case `url` to TokenOrValue::Url. CSS function names are
             // ASCII-insensitive, so upper-case and escaped spellings can still
             // arrive here and must retain URL semantics.
-            self.check_function_resources(function, ResourceKind::Url, true)?;
+            self.check_function_resources(function, ResourceSyntax::Url, true)?;
         } else if name.eq_ignore_ascii_case("var") {
-            Self::act(self.policy.check_unparsed_variable(function, self.ctx))?;
-        } else if name.eq_ignore_ascii_case("env") {
             Self::act(
                 self.policy
-                    .check_unparsed_environment_variable(function, self.ctx),
+                    .dynamic_value(DynamicValueRef::UnparsedVariable(function), &self.ctx),
             )?;
+        } else if name.eq_ignore_ascii_case("env") {
+            Self::act(self.policy.dynamic_value(
+                DynamicValueRef::UnparsedEnvironmentVariable(function),
+                &self.ctx,
+            ))?;
         } else if name.eq_ignore_ascii_case("src") {
-            self.check_function_resources(function, ResourceKind::Src, true)?;
+            self.check_function_resources(function, ResourceSyntax::Src, true)?;
         } else if name.eq_ignore_ascii_case("image") {
-            self.check_function_resources(function, ResourceKind::Image, false)?;
+            self.check_function_resources(function, ResourceSyntax::Image, false)?;
         } else if name.eq_ignore_ascii_case("image-set")
             || name.eq_ignore_ascii_case("-webkit-image-set")
         {
-            self.check_function_resources(function, ResourceKind::ImageSet, false)?;
+            self.check_function_resources(function, ResourceSyntax::ImageSet, false)?;
         } else {
-            Self::act(self.policy.check_function(function, self.ctx))?;
+            Self::act(
+                self.policy
+                    .dynamic_value(DynamicValueRef::Function(function), &self.ctx),
+            )?;
         }
 
         function.visit_children(self)
     }
 }
 
-impl<'i, 'a> Visitor<'i> for ValueGuard<'a> {
+impl<'i, 'a> Visitor<'i> for ValueGuard<'a, 'i> {
     type Error = Denied;
 
     fn visit_types(&self) -> VisitTypes {
@@ -133,7 +144,7 @@ impl<'i, 'a> Visitor<'i> for ValueGuard<'a> {
     }
 
     fn visit_url(&mut self, url: &mut Url<'i>) -> Result<(), Denied> {
-        Self::act(self.policy.check_url(url, self.ctx))
+        self.check_resource(ResourceSyntax::Url, Some(url.url.as_ref()))
     }
 
     fn visit_image(&mut self, image: &mut Image<'i>) -> Result<(), Denied> {
@@ -152,7 +163,10 @@ impl<'i, 'a> Visitor<'i> for ValueGuard<'a> {
     }
 
     fn visit_variable(&mut self, variable: &mut Variable<'i>) -> Result<(), Denied> {
-        Self::act(self.policy.check_variable(variable, self.ctx))?;
+        Self::act(
+            self.policy
+                .dynamic_value(DynamicValueRef::Variable(variable), &self.ctx),
+        )?;
         variable.visit_children(self)
     }
 
@@ -160,7 +174,10 @@ impl<'i, 'a> Visitor<'i> for ValueGuard<'a> {
         &mut self,
         env: &mut EnvironmentVariable<'i>,
     ) -> Result<(), Denied> {
-        Self::act(self.policy.check_environment_variable(env, self.ctx))?;
+        Self::act(
+            self.policy
+                .dynamic_value(DynamicValueRef::EnvironmentVariable(env), &self.ctx),
+        )?;
         env.visit_children(self)
     }
 
@@ -168,26 +185,32 @@ impl<'i, 'a> Visitor<'i> for ValueGuard<'a> {
         // When `TOKENS` is requested, lightningcss dispatches *every*
         // `TokenOrValue` here first — including the parsed `Url`/`Var`/`Env`
         // variants — so we must route those to their dedicated checks before
-        // falling back to `check_token` for genuinely raw/unknown tokens.
+        // falling back to the token hook for genuinely raw/unknown tokens.
         match token {
             TokenOrValue::Url(url) => self.visit_url(url),
             TokenOrValue::Var(variable) => {
-                Self::act(self.policy.check_variable(variable, self.ctx))?;
+                Self::act(
+                    self.policy
+                        .dynamic_value(DynamicValueRef::Variable(variable), &self.ctx),
+                )?;
                 variable.visit_children(self)
             }
             TokenOrValue::Env(env) => {
-                Self::act(self.policy.check_environment_variable(env, self.ctx))?;
+                Self::act(
+                    self.policy
+                        .dynamic_value(DynamicValueRef::EnvironmentVariable(env), &self.ctx),
+                )?;
                 env.visit_children(self)
             }
             TokenOrValue::Function(function) => self.visit_generic_function(function),
             TokenOrValue::Token(Token::UnquotedUrl(value)) => {
-                self.check_resource(ResourceKind::Url, Some(value.as_ref()))
+                self.check_resource(ResourceSyntax::Url, Some(value.as_ref()))
             }
             // A bad URL is malformed by definition. Never let error recovery
             // turn it into a policy-controlled fetchable value.
             TokenOrValue::Token(Token::BadUrl(_)) => Err(Denied),
             other => {
-                Self::act(self.policy.check_token(other, self.ctx))?;
+                Self::act(self.policy.token(other, &self.ctx))?;
                 other.visit_children(self)
             }
         }
@@ -195,20 +218,20 @@ impl<'i, 'a> Visitor<'i> for ValueGuard<'a> {
 }
 
 /// Returns `true` if every value inside `property` is allowed by the policy.
-pub(crate) fn property_allowed(
-    property: &mut Property<'_>,
-    policy: &dyn CssSanitizationPolicy,
-    ctx: ValueContext,
+pub(crate) fn property_allowed<'i>(
+    property: &mut Property<'i>,
+    policy: &dyn CssPolicy,
+    ctx: ValueContext<'i>,
 ) -> bool {
     let mut guard = ValueGuard { policy, ctx };
     property.visit(&mut guard).is_ok()
 }
 
 /// Returns `true` if every value inside an `@font-face` descriptor is allowed.
-pub(crate) fn font_face_property_allowed(
-    property: &mut FontFaceProperty<'_>,
-    policy: &dyn CssSanitizationPolicy,
-    ctx: ValueContext,
+pub(crate) fn font_face_property_allowed<'i>(
+    property: &mut FontFaceProperty<'i>,
+    policy: &dyn CssPolicy,
+    ctx: ValueContext<'i>,
 ) -> bool {
     let mut guard = ValueGuard { policy, ctx };
     property.visit(&mut guard).is_ok()
@@ -216,10 +239,10 @@ pub(crate) fn font_face_property_allowed(
 
 /// Returns `true` if every value inside an `@font-palette-values` descriptor is
 /// allowed.
-pub(crate) fn font_palette_values_property_allowed(
-    property: &mut FontPaletteValuesProperty<'_>,
-    policy: &dyn CssSanitizationPolicy,
-    ctx: ValueContext,
+pub(crate) fn font_palette_values_property_allowed<'i>(
+    property: &mut FontPaletteValuesProperty<'i>,
+    policy: &dyn CssPolicy,
+    ctx: ValueContext<'i>,
 ) -> bool {
     let mut guard = ValueGuard { policy, ctx };
     property.visit(&mut guard).is_ok()
@@ -227,20 +250,20 @@ pub(crate) fn font_palette_values_property_allowed(
 
 /// Returns `true` if every value inside a `@view-transition` descriptor is
 /// allowed.
-pub(crate) fn view_transition_property_allowed(
-    property: &mut ViewTransitionProperty<'_>,
-    policy: &dyn CssSanitizationPolicy,
-    ctx: ValueContext,
+pub(crate) fn view_transition_property_allowed<'i>(
+    property: &mut ViewTransitionProperty<'i>,
+    policy: &dyn CssPolicy,
+    ctx: ValueContext<'i>,
 ) -> bool {
     let mut guard = ValueGuard { policy, ctx };
     property.visit(&mut guard).is_ok()
 }
 
 /// Returns `true` if every value inside a raw token list is allowed.
-pub(crate) fn token_list_allowed(
-    tokens: &mut TokenList<'_>,
-    policy: &dyn CssSanitizationPolicy,
-    ctx: ValueContext,
+pub(crate) fn token_list_allowed<'i>(
+    tokens: &mut TokenList<'i>,
+    policy: &dyn CssPolicy,
+    ctx: ValueContext<'i>,
 ) -> bool {
     let mut guard = ValueGuard { policy, ctx };
     tokens.visit(&mut guard).is_ok()
@@ -249,15 +272,15 @@ pub(crate) fn token_list_allowed(
 /// Returns `true` if every value inside an `@property` `initial-value` is
 /// allowed. `ParsedComponent::Repeated.components` is `#[skip_type]` in
 /// lightningcss, so the repeated case is recursed manually.
-pub(crate) fn parsed_component_allowed(
-    component: &mut ParsedComponent<'_>,
-    policy: &dyn CssSanitizationPolicy,
-    ctx: ValueContext,
+pub(crate) fn parsed_component_allowed<'i>(
+    component: &mut ParsedComponent<'i>,
+    policy: &dyn CssPolicy,
+    ctx: ValueContext<'i>,
 ) -> bool {
     if let ParsedComponent::Repeated { components, .. } = component {
         return components
             .iter_mut()
-            .all(|component| parsed_component_allowed(component, policy, ctx));
+            .all(|component| parsed_component_allowed(component, policy, ctx.clone()));
     }
 
     let mut guard = ValueGuard { policy, ctx };

@@ -1,187 +1,217 @@
-//! Differential completeness test.
-//!
-//! lightningcss's own `Visit` traversal is generated from its AST definitions.
-//! We use it as an *oracle*: for a corpus of CSS, the
-//! number of selector lists and the set of urls that lightningcss's traversal
-//! reaches must equal what the sanitizer's policy is given a chance to inspect.
-//! This verifies typed AST traversal for constructs present in the corpus;
-//! semantic resources that lightningcss leaves generic are tested separately in
-//! `security_audit_tests`.
+//! Broad AST-variant coverage independent from `StrictPolicy` configuration.
 
-mod common;
+use std::cell::RefCell;
+use std::collections::HashSet;
 
-use std::cell::{Cell, RefCell};
-use std::convert::Infallible;
-
-use css_sanitizer::lightningcss::stylesheet::{ParserOptions, StyleSheet};
-use css_sanitizer::lightningcss::values::image::Image;
-use css_sanitizer::lightningcss::values::url::Url;
-use css_sanitizer::lightningcss::visitor::{Visit, VisitTypes, Visitor};
+use css_sanitizer::lightningcss::properties::Property;
+use css_sanitizer::lightningcss::properties::custom::TokenOrValue;
+use css_sanitizer::lightningcss::rules::CssRule;
+use css_sanitizer::lightningcss::rules::font_face::FontFaceProperty;
+use css_sanitizer::lightningcss::rules::font_feature_values::FontFeatureSubrule;
+use css_sanitizer::lightningcss::rules::font_palette_values::FontPaletteValuesProperty;
+use css_sanitizer::lightningcss::rules::page::PageMarginRule;
+use css_sanitizer::lightningcss::rules::view_transition::ViewTransitionProperty;
+use css_sanitizer::lightningcss::selector::SelectorList;
 use css_sanitizer::{
-    CssSanitizationPolicy, NodeAction, RuleContext, SelectorContext, ValueAction, ValueContext,
-    sanitize_stylesheet_ast,
+    CssPolicy, DescriptorContext, DynamicValueRef, ImportContext, ImportDecision, NodeDecision,
+    PropertyContext, ResourceRef, RuleContext, RuleKind, SanitizeOptions, SelectorContext,
+    ValueContext, ValueDecision, sanitize_stylesheet_with_options,
 };
 
-const CORPUS: &str = r#"
-    .a, .b { color: red; background: url('bg.png') }
-    @media (min-width: 1px) { .c { color: blue } }
-    @keyframes spin { from { opacity: 0 } to { opacity: 1 } }
-    @font-face { font-family: x; src: url('font.woff2') }
-    @supports (display: grid) { .d { color: green } }
-    @scope (.root .here) to (.limit) { .e { background-image: url('scope.png') } }
-    .f { & .nested { color: pink } }
-    @page { margin: 1cm; @top-left { content: url('mark.png') } }
-    @container (min-width: 1px) { .g { color: gold } }
-    @layer base { .h { color: tan } }
-    @starting-style { .i { color: cyan } }
-    @position-try --fallback { background-image: url('position.png') }
-    .j { background-image: image-set(url('a.png') 1x, url('b.png') 2x) }
-    .k { width: var(--x, url('var.png')) }
-"#;
-
-// ---- Oracle: lightningcss Visit ----
-
-struct Oracle {
-    selector_lists: usize,
-    urls: Vec<String>,
-}
-
-impl<'i> Visitor<'i> for Oracle {
-    type Error = Infallible;
-
-    fn visit_types(&self) -> VisitTypes {
-        VisitTypes::SELECTORS | VisitTypes::URLS | VisitTypes::IMAGES
-    }
-
-    fn visit_selector_list(
-        &mut self,
-        _selectors: &mut css_sanitizer::lightningcss::selector::SelectorList<'i>,
-    ) -> Result<(), Infallible> {
-        self.selector_lists += 1;
-        Ok(())
-    }
-
-    fn visit_url(&mut self, url: &mut Url<'i>) -> Result<(), Infallible> {
-        self.urls.push(url.url.to_string());
-        Ok(())
-    }
-
-    fn visit_image(&mut self, image: &mut Image<'i>) -> Result<(), Infallible> {
-        // Mirror the guard's image-set workaround (the option image is
-        // `#[skip_type]`), so the oracle sees image-set urls too.
-        if let Image::ImageSet(image_set) = image {
-            for option in &mut image_set.options {
-                self.visit_image(&mut option.image)?;
-            }
-            return Ok(());
-        }
-        image.visit_children(self)
-    }
-}
-
-// ---- Recorder: an allow-all sanitizer policy that records what it is shown ----
-
 #[derive(Default)]
-struct Recorder {
-    selector_lists: Cell<usize>,
-    urls: RefCell<Vec<String>>,
+struct RecordingPolicy {
+    rules: RefCell<HashSet<RuleKind>>,
 }
 
-impl CssSanitizationPolicy for Recorder {
-    fn visit_rule(
+impl CssPolicy for RecordingPolicy {
+    fn rule(&self, _rule: &mut CssRule<'_>, context: RuleContext) -> NodeDecision {
+        self.rules.borrow_mut().insert(context.kind);
+        NodeDecision::Keep
+    }
+
+    fn selector(
         &self,
-        _rule: &mut css_sanitizer::lightningcss::rules::CssRule<'_>,
-        _: RuleContext,
-    ) -> NodeAction {
-        NodeAction::Continue
+        _selectors: &mut SelectorList<'_>,
+        _context: SelectorContext,
+    ) -> NodeDecision {
+        NodeDecision::Keep
     }
 
-    fn visit_selector_list(
+    fn property(
         &self,
-        _selectors: &mut css_sanitizer::lightningcss::selector::SelectorList<'_>,
-        _: SelectorContext,
-    ) -> NodeAction {
-        self.selector_lists.set(self.selector_lists.get() + 1);
-        NodeAction::Continue
+        _property: &mut Property<'_>,
+        _context: PropertyContext<'_>,
+    ) -> NodeDecision {
+        NodeDecision::Keep
     }
 
-    fn visit_property(
+    fn font_face_descriptor(
         &self,
-        _property: &mut css_sanitizer::lightningcss::properties::Property<'_>,
-        _: css_sanitizer::PropertyContext,
-    ) -> NodeAction {
-        NodeAction::Continue
+        _property: &mut FontFaceProperty<'_>,
+        _context: DescriptorContext,
+    ) -> NodeDecision {
+        NodeDecision::Keep
     }
 
-    fn visit_font_face_property(
+    fn font_palette_values_descriptor(
         &self,
-        _property: &mut css_sanitizer::lightningcss::rules::font_face::FontFaceProperty<'_>,
-        _: css_sanitizer::DescriptorContext,
-    ) -> NodeAction {
-        NodeAction::Continue
+        _property: &mut FontPaletteValuesProperty<'_>,
+        _context: DescriptorContext,
+    ) -> NodeDecision {
+        NodeDecision::Keep
     }
 
-    fn check_url(&self, url: &Url<'_>, _: ValueContext) -> ValueAction {
-        self.urls.borrow_mut().push(url.url.to_string());
-        ValueAction::Allow
-    }
-
-    fn check_variable(
+    fn view_transition_descriptor(
         &self,
-        _v: &css_sanitizer::lightningcss::properties::custom::Variable<'_>,
-        _: ValueContext,
-    ) -> ValueAction {
-        ValueAction::Allow
+        _property: &mut ViewTransitionProperty<'_>,
+        _context: DescriptorContext,
+    ) -> NodeDecision {
+        NodeDecision::Keep
     }
 
-    fn check_environment_variable(
+    fn page_margin_rule(
         &self,
-        _e: &css_sanitizer::lightningcss::properties::custom::EnvironmentVariable<'_>,
-        _: ValueContext,
-    ) -> ValueAction {
-        ValueAction::Allow
+        _rule: &mut PageMarginRule<'_>,
+        _context: RuleContext,
+    ) -> NodeDecision {
+        NodeDecision::Keep
     }
 
-    fn check_token(
+    fn font_feature_values_subrule(
         &self,
-        _t: &css_sanitizer::lightningcss::properties::custom::TokenOrValue<'_>,
-        _: ValueContext,
-    ) -> ValueAction {
-        ValueAction::Allow
+        _rule: &mut FontFeatureSubrule<'_>,
+        _context: RuleContext,
+    ) -> NodeDecision {
+        NodeDecision::Keep
     }
-}
 
-fn sorted(mut v: Vec<String>) -> Vec<String> {
-    v.sort();
-    v
+    fn import(&self, _context: ImportContext<'_>) -> ImportDecision {
+        ImportDecision::AllowPassthrough
+    }
+
+    fn resource(&self, _resource: ResourceRef<'_>, _context: &ValueContext<'_>) -> ValueDecision {
+        ValueDecision::Allow
+    }
+
+    fn dynamic_value(
+        &self,
+        _value: DynamicValueRef<'_, '_>,
+        _context: &ValueContext<'_>,
+    ) -> ValueDecision {
+        ValueDecision::Allow
+    }
+
+    fn token(&self, _token: &TokenOrValue<'_>, _context: &ValueContext<'_>) -> ValueDecision {
+        ValueDecision::Allow
+    }
 }
 
 #[test]
-fn sanitizer_reaches_every_url_and_selector_list_the_visit_oracle_does() {
-    // Oracle pass over the untouched AST.
-    let mut oracle_sheet =
-        StyleSheet::parse(CORPUS, ParserOptions::default()).expect("corpus should parse");
-    let mut oracle = Oracle {
-        selector_lists: 0,
-        urls: Vec::new(),
-    };
-    oracle_sheet.visit(&mut oracle).unwrap();
+fn every_typed_rule_family_reaches_the_shared_rule_hook() {
+    let cases = [
+        (RuleKind::Import, "@import 'theme.css';"),
+        (RuleKind::Style, ".card { color: red }"),
+        (RuleKind::Media, "@media all { .card { color: red } }"),
+        (
+            RuleKind::Keyframes,
+            "@keyframes fade { from { opacity: 0 } to { opacity: 1 } }",
+        ),
+        (
+            RuleKind::FontFace,
+            "@font-face { font-family: Demo; src: url('font.woff2') }",
+        ),
+        (
+            RuleKind::FontPaletteValues,
+            "@font-palette-values --demo { base-palette: 0 }",
+        ),
+        (
+            RuleKind::FontFeatureValues,
+            "@font-feature-values Demo { @styleset { alt: 1 } }",
+        ),
+        (RuleKind::Page, "@page { margin: 1cm }"),
+        (
+            RuleKind::Supports,
+            "@supports (display: block) { .card { color: red } }",
+        ),
+        (
+            RuleKind::CounterStyle,
+            "@counter-style thumbs { system: cyclic; symbols: '*'; suffix: ' ' }",
+        ),
+        (
+            RuleKind::Namespace,
+            "@namespace svg 'http://www.w3.org/2000/svg';",
+        ),
+        (
+            RuleKind::MozDocument,
+            "@-moz-document url-prefix() { .card { color: red } }",
+        ),
+        (RuleKind::Nesting, ".card { @nest & .child { color: red } }"),
+        (
+            RuleKind::NestedDeclarations,
+            ".card { .child { color: red } width: 1px }",
+        ),
+        (RuleKind::Viewport, "@viewport { zoom: 1 }"),
+        (
+            RuleKind::PositionTry,
+            "@position-try --fallback { top: 1px }",
+        ),
+        (
+            RuleKind::CustomMedia,
+            "@custom-media --narrow (max-width: 30em);",
+        ),
+        (RuleKind::LayerStatement, "@layer reset, components;"),
+        (
+            RuleKind::LayerBlock,
+            "@layer components { .card { color: red } }",
+        ),
+        (
+            RuleKind::PropertyRegistration,
+            "@property --tone { syntax: '<color>'; inherits: false; initial-value: red }",
+        ),
+        (
+            RuleKind::Container,
+            "@container (min-width: 1px) { .card { color: red } }",
+        ),
+        (RuleKind::Scope, "@scope (.root) { .card { color: red } }"),
+        (
+            RuleKind::StartingStyle,
+            "@starting-style { .card { color: red } }",
+        ),
+        (
+            RuleKind::ViewTransition,
+            "@view-transition { navigation: auto }",
+        ),
+        (RuleKind::Unknown, "@future-rule mode { payload: safe }"),
+    ];
 
-    // Sanitizer pass with an allow-all recording policy.
-    let mut sheet =
-        StyleSheet::parse(CORPUS, ParserOptions::default()).expect("corpus should parse");
-    let recorder = Recorder::default();
-    sanitize_stylesheet_ast(&mut sheet, &recorder);
+    for (expected, input) in cases {
+        let policy = RecordingPolicy::default();
+        let options = if expected == RuleKind::CustomMedia {
+            SanitizeOptions::default().with_parser_flags(
+                css_sanitizer::lightningcss::stylesheet::ParserFlags::CUSTOM_MEDIA,
+            )
+        } else {
+            SanitizeOptions::default()
+        };
+        sanitize_stylesheet_with_options(input, &policy, options).expect("fixture should sanitize");
+        assert!(
+            policy.rules.borrow().contains(&expected),
+            "{expected:?} did not reach the rule hook for {input:?}; observed {:?}",
+            policy.rules.borrow()
+        );
+    }
+}
 
-    assert_eq!(
-        recorder.selector_lists.get(),
-        oracle.selector_lists,
-        "sanitizer must inspect exactly the selector lists the Visit oracle reaches",
-    );
+#[test]
+fn rule_kind_mapping_is_exhaustive_for_the_upstream_css_rule_enum() {
+    fn classify(rule: &CssRule<'_>) -> RuleKind {
+        RuleKind::of(rule)
+    }
 
-    assert_eq!(
-        sorted(recorder.urls.into_inner()),
-        sorted(oracle.urls),
-        "sanitizer must inspect every url the Visit oracle reaches",
-    );
+    let stylesheet = css_sanitizer::lightningcss::stylesheet::StyleSheet::parse(
+        ".card { color: red }",
+        Default::default(),
+    )
+    .expect("fixture should parse");
+    assert_eq!(classify(&stylesheet.rules.0[0]), RuleKind::Style);
 }

@@ -1,8 +1,13 @@
+use std::cell::Cell;
+
 use crate::guard;
-use crate::options::SanitizeOptions;
+use crate::options::{ParseLimits, SanitizeOptions};
+use crate::output::{SanitizeError, SanitizeOutput, SanitizeReport, SanitizedCss};
 use crate::policy::{
-    CssSanitizationPolicy, DescriptorContext, NodeAction, PropertyContext, ResourceKind,
-    ResourceRef, RuleContext, SelectorContext, ValueAction, ValueContext, ValueLocation,
+    CssPolicy, DescriptorContext, DescriptorKind, FontFaceDescriptorKind,
+    FontPaletteValuesDescriptorKind, ImportContext, ImportDecision, NodeDecision, PropertyContext,
+    PropertyLocation, RuleContext, RuleKind, SelectorContext, SelectorLocation, ValueContext,
+    ViewTransitionDescriptorKind,
 };
 use lightningcss::declaration::DeclarationBlock;
 use lightningcss::printer::{Printer, PrinterOptions};
@@ -17,47 +22,13 @@ use lightningcss::selector::SelectorList;
 use lightningcss::stylesheet::{ParserOptions, StyleSheet};
 use lightningcss::traits::ToCss;
 
-#[derive(Clone, Copy)]
-enum SelectorLocation {
-    StyleRule,
-    Nesting,
-    Scope,
-}
-
-#[derive(Clone, Copy)]
-enum PropertyLocation {
-    DeclarationList,
-    StyleRule,
-    NestedDeclarations,
-    Keyframe,
-    Page,
-    PageMargin,
-    CounterStyle,
-    Viewport,
-    PositionTry,
-}
-
-impl PropertyLocation {
-    fn value_location(self) -> ValueLocation {
-        match self {
-            PropertyLocation::DeclarationList => ValueLocation::DeclarationList,
-            PropertyLocation::StyleRule => ValueLocation::StyleRule,
-            PropertyLocation::NestedDeclarations => ValueLocation::NestedDeclarations,
-            PropertyLocation::Keyframe => ValueLocation::Keyframe,
-            PropertyLocation::Page => ValueLocation::Page,
-            PropertyLocation::PageMargin => ValueLocation::PageMargin,
-            PropertyLocation::CounterStyle => ValueLocation::CounterStyle,
-            PropertyLocation::Viewport => ValueLocation::Viewport,
-            PropertyLocation::PositionTry => ValueLocation::PositionTry,
-        }
-    }
-}
-
-fn serialize_declaration_block(block: &DeclarationBlock<'_>) -> Option<String> {
+fn serialize_declaration_block(block: &DeclarationBlock<'_>) -> Result<String, SanitizeError> {
     let mut output = String::new();
     let mut printer = Printer::new(&mut output, PrinterOptions::default());
-    block.to_css(&mut printer).ok()?;
-    Some(output)
+    block
+        .to_css(&mut printer)
+        .map_err(|error| SanitizeError::Serialize(error.to_string()))?;
+    Ok(output)
 }
 
 fn is_rule_empty(rule: &CssRule<'_>) -> bool {
@@ -90,76 +61,116 @@ fn is_rule_empty(rule: &CssRule<'_>) -> bool {
     }
 }
 
-/// Carries the policy and options through the recursive traversal.
+#[derive(Default)]
+struct ReportCounters {
+    dropped_rules: Cell<usize>,
+    dropped_selector_lists: Cell<usize>,
+    dropped_declarations: Cell<usize>,
+    dropped_descriptors: Cell<usize>,
+    rejected_values: Cell<usize>,
+}
+
+impl ReportCounters {
+    fn increment(cell: &Cell<usize>) {
+        cell.set(cell.get() + 1);
+    }
+
+    fn finish(&self) -> SanitizeReport {
+        SanitizeReport {
+            dropped_rules: self.dropped_rules.get(),
+            dropped_selector_lists: self.dropped_selector_lists.get(),
+            dropped_declarations: self.dropped_declarations.get(),
+            dropped_descriptors: self.dropped_descriptors.get(),
+            rejected_values: self.rejected_values.get(),
+        }
+    }
+}
+
 struct Engine<'p> {
-    policy: &'p dyn CssSanitizationPolicy,
-    opts: SanitizeOptions,
+    policy: &'p dyn CssPolicy,
+    options: SanitizeOptions,
+    report: ReportCounters,
 }
 
 impl<'p> Engine<'p> {
+    fn new(policy: &'p dyn CssPolicy, options: SanitizeOptions) -> Self {
+        Self {
+            policy,
+            options,
+            report: ReportCounters::default(),
+        }
+    }
+
     fn sanitize_selector_list(
         &self,
         selectors: &mut SelectorList<'_>,
+        rule: RuleKind,
         location: SelectorLocation,
         depth: usize,
     ) -> bool {
-        let ctx = SelectorContext { depth };
-        let action = match location {
-            SelectorLocation::StyleRule => self.policy.visit_style_rule_selectors(selectors, ctx),
-            SelectorLocation::Nesting => self.policy.visit_nesting_selectors(selectors, ctx),
-            SelectorLocation::Scope => self.policy.visit_scope_selectors(selectors, ctx),
-        };
-
-        !matches!(action, NodeAction::Drop)
+        let keep = matches!(
+            self.policy.selector(
+                selectors,
+                SelectorContext {
+                    rule,
+                    location,
+                    depth,
+                },
+            ),
+            NodeDecision::Keep
+        );
+        if !keep {
+            ReportCounters::increment(&self.report.dropped_selector_lists);
+        }
+        keep
     }
 
     fn sanitize_property_vec(
         &self,
         properties: &mut Vec<lightningcss::properties::Property<'_>>,
         location: PropertyLocation,
+        rule: Option<RuleKind>,
         depth: usize,
         important: bool,
     ) {
-        let value_location = location.value_location();
         properties.retain_mut(|property| {
-            let ctx = PropertyContext { depth, important };
-            let action = match location {
-                PropertyLocation::DeclarationList => {
-                    self.policy.visit_declaration_list_property(property, ctx)
-                }
-                PropertyLocation::StyleRule => self.policy.visit_style_property(property, ctx),
-                PropertyLocation::NestedDeclarations => self
-                    .policy
-                    .visit_nested_declarations_property(property, ctx),
-                PropertyLocation::Keyframe => self.policy.visit_keyframe_property(property, ctx),
-                PropertyLocation::Page => self.policy.visit_page_property(property, ctx),
-                PropertyLocation::PageMargin => {
-                    self.policy.visit_page_margin_property(property, ctx)
-                }
-                PropertyLocation::CounterStyle => {
-                    self.policy.visit_counter_style_property(property, ctx)
-                }
-                PropertyLocation::Viewport => self.policy.visit_viewport_property(property, ctx),
-                PropertyLocation::PositionTry => {
-                    self.policy.visit_position_try_property(property, ctx)
-                }
-            };
-
-            match action {
-                NodeAction::Drop => false,
-                NodeAction::Skip | NodeAction::Continue => {
-                    !self.opts.enforce_value_guard
-                        || guard::property_allowed(
-                            property,
-                            self.policy,
-                            ValueContext {
-                                depth,
-                                important,
-                                location: value_location,
-                            },
-                        )
-                }
+            let key = property.property_id();
+            let decision = self.policy.property(
+                property,
+                PropertyContext {
+                    key: key.clone(),
+                    rule,
+                    location,
+                    depth,
+                    important,
+                },
+            );
+            if matches!(decision, NodeDecision::Drop) {
+                ReportCounters::increment(&self.report.dropped_declarations);
+                return false;
             }
+
+            // Structural policies may rewrite the property in place. Value and
+            // resource decisions must observe the post-policy property kind.
+            let key = property.property_id();
+            let allowed = !self.options.enforce_value_guard
+                || guard::property_allowed(
+                    property,
+                    self.policy,
+                    ValueContext {
+                        property: Some(key),
+                        descriptor: None,
+                        rule,
+                        location,
+                        depth,
+                        important,
+                    },
+                );
+            if !allowed {
+                ReportCounters::increment(&self.report.dropped_declarations);
+                ReportCounters::increment(&self.report.rejected_values);
+            }
+            allowed
         });
     }
 
@@ -167,90 +178,148 @@ impl<'p> Engine<'p> {
         &self,
         block: &mut DeclarationBlock<'_>,
         location: PropertyLocation,
+        rule: Option<RuleKind>,
         depth: usize,
     ) {
-        self.sanitize_property_vec(&mut block.declarations, location, depth, false);
-        self.sanitize_property_vec(&mut block.important_declarations, location, depth, true);
+        self.sanitize_property_vec(&mut block.declarations, location, rule, depth, false);
+        self.sanitize_property_vec(
+            &mut block.important_declarations,
+            location,
+            rule,
+            depth,
+            true,
+        );
     }
 
-    fn sanitize_font_face_properties(
+    fn sanitize_font_face_properties<'i>(
         &self,
-        properties: &mut Vec<FontFaceProperty<'_>>,
+        properties: &mut Vec<FontFaceProperty<'i>>,
         depth: usize,
     ) {
         properties.retain_mut(|property| {
-            let action = self
-                .policy
-                .visit_font_face_property(property, DescriptorContext { depth });
-            self.descriptor_kept(action, || {
-                guard::font_face_property_allowed(
-                    property,
-                    self.policy,
-                    ValueContext {
-                        depth,
-                        important: false,
-                        location: ValueLocation::FontFaceDescriptor,
-                    },
-                )
-            })
+            let descriptor = DescriptorKind::FontFace(FontFaceDescriptorKind::of(property));
+            let decision = self.policy.font_face_descriptor(
+                property,
+                DescriptorContext {
+                    rule: RuleKind::FontFace,
+                    kind: descriptor,
+                    depth,
+                },
+            );
+            let descriptor = DescriptorKind::FontFace(FontFaceDescriptorKind::of(property));
+            self.descriptor_allowed(
+                property,
+                decision,
+                descriptor,
+                depth,
+                |property, context| {
+                    guard::font_face_property_allowed(property, self.policy, context)
+                },
+            )
         });
     }
 
-    fn sanitize_font_palette_values_properties(
+    fn sanitize_font_palette_values_properties<'i>(
         &self,
-        properties: &mut Vec<FontPaletteValuesProperty<'_>>,
+        properties: &mut Vec<FontPaletteValuesProperty<'i>>,
         depth: usize,
     ) {
         properties.retain_mut(|property| {
-            let action = self
-                .policy
-                .visit_font_palette_values_property(property, DescriptorContext { depth });
-            self.descriptor_kept(action, || {
-                guard::font_palette_values_property_allowed(
-                    property,
-                    self.policy,
-                    ValueContext {
-                        depth,
-                        important: false,
-                        location: ValueLocation::FontPaletteValuesDescriptor,
-                    },
-                )
-            })
+            let descriptor =
+                DescriptorKind::FontPaletteValues(FontPaletteValuesDescriptorKind::of(property));
+            let decision = self.policy.font_palette_values_descriptor(
+                property,
+                DescriptorContext {
+                    rule: RuleKind::FontPaletteValues,
+                    kind: descriptor,
+                    depth,
+                },
+            );
+            let descriptor =
+                DescriptorKind::FontPaletteValues(FontPaletteValuesDescriptorKind::of(property));
+            self.descriptor_allowed(
+                property,
+                decision,
+                descriptor,
+                depth,
+                |property, context| {
+                    guard::font_palette_values_property_allowed(property, self.policy, context)
+                },
+            )
         });
     }
 
-    fn sanitize_view_transition_properties(
+    fn sanitize_view_transition_properties<'i>(
         &self,
-        properties: &mut Vec<ViewTransitionProperty<'_>>,
+        properties: &mut Vec<ViewTransitionProperty<'i>>,
         depth: usize,
     ) {
         properties.retain_mut(|property| {
-            let action = self
-                .policy
-                .visit_view_transition_property(property, DescriptorContext { depth });
-            self.descriptor_kept(action, || {
-                guard::view_transition_property_allowed(
-                    property,
-                    self.policy,
-                    ValueContext {
-                        depth,
-                        important: false,
-                        location: ValueLocation::ViewTransitionDescriptor,
-                    },
-                )
-            })
+            let descriptor =
+                DescriptorKind::ViewTransition(ViewTransitionDescriptorKind::of(property));
+            let decision = self.policy.view_transition_descriptor(
+                property,
+                DescriptorContext {
+                    rule: RuleKind::ViewTransition,
+                    kind: descriptor,
+                    depth,
+                },
+            );
+            let descriptor =
+                DescriptorKind::ViewTransition(ViewTransitionDescriptorKind::of(property));
+            self.descriptor_allowed(
+                property,
+                decision,
+                descriptor,
+                depth,
+                |property, context| {
+                    guard::view_transition_property_allowed(property, self.policy, context)
+                },
+            )
         });
     }
 
-    /// Shared keep/drop logic for descriptor properties. Engine value/resource
-    /// guards apply equally to `Skip` and `Continue` when enabled.
-    fn descriptor_kept(&self, action: NodeAction, value_guard: impl FnOnce() -> bool) -> bool {
-        match action {
-            NodeAction::Drop => false,
-            NodeAction::Skip | NodeAction::Continue => {
-                !self.opts.enforce_value_guard || value_guard()
-            }
+    fn descriptor_allowed<'i, T>(
+        &self,
+        property: &mut T,
+        decision: NodeDecision,
+        descriptor: DescriptorKind,
+        depth: usize,
+        value_guard: impl FnOnce(&mut T, ValueContext<'i>) -> bool,
+    ) -> bool {
+        if matches!(decision, NodeDecision::Drop) {
+            ReportCounters::increment(&self.report.dropped_descriptors);
+            return false;
         }
+        let allowed = !self.options.enforce_value_guard
+            || value_guard(
+                property,
+                ValueContext {
+                    property: None,
+                    descriptor: Some(descriptor),
+                    rule: Some(match descriptor {
+                        DescriptorKind::FontFace(_) => RuleKind::FontFace,
+                        DescriptorKind::FontPaletteValues(_) => RuleKind::FontPaletteValues,
+                        DescriptorKind::ViewTransition(_) => RuleKind::ViewTransition,
+                    }),
+                    location: match descriptor {
+                        DescriptorKind::FontFace(_) => PropertyLocation::FontFaceDescriptor,
+                        DescriptorKind::FontPaletteValues(_) => {
+                            PropertyLocation::FontPaletteValuesDescriptor
+                        }
+                        DescriptorKind::ViewTransition(_) => {
+                            PropertyLocation::ViewTransitionDescriptor
+                        }
+                    },
+                    depth,
+                    important: false,
+                },
+            );
+        if !allowed {
+            ReportCounters::increment(&self.report.dropped_descriptors);
+            ReportCounters::increment(&self.report.rejected_values);
+        }
+        allowed
     }
 
     fn sanitize_font_feature_values_subrules(
@@ -259,36 +328,64 @@ impl<'p> Engine<'p> {
         depth: usize,
     ) {
         rule.rules.retain(|_, subrule| {
-            let ctx = RuleContext { depth };
-            match self.policy.visit_font_feature_values_subrule(subrule, ctx) {
-                NodeAction::Drop => false,
-                NodeAction::Skip | NodeAction::Continue => !subrule.declarations.is_empty(),
+            let keep = matches!(
+                self.policy.font_feature_values_subrule(
+                    subrule,
+                    RuleContext {
+                        kind: RuleKind::FontFeatureValues,
+                        depth,
+                    },
+                ),
+                NodeDecision::Keep
+            ) && !subrule.declarations.is_empty();
+            if !keep {
+                ReportCounters::increment(&self.report.dropped_rules);
             }
+            keep
         });
     }
 
     fn sanitize_page_margin_rules(&self, rules: &mut Vec<PageMarginRule<'_>>, depth: usize) {
         rules.retain_mut(|rule| {
-            let ctx = RuleContext { depth };
-
-            match self.policy.visit_page_margin_rule(rule, ctx) {
-                NodeAction::Drop => false,
-                NodeAction::Skip | NodeAction::Continue => {
-                    self.sanitize_declaration_block_inner(
-                        &mut rule.declarations,
-                        PropertyLocation::PageMargin,
-                        depth + 1,
-                    );
-
-                    !rule.declarations.is_empty()
-                }
+            if !matches!(
+                self.policy.page_margin_rule(
+                    rule,
+                    RuleContext {
+                        kind: RuleKind::Page,
+                        depth,
+                    },
+                ),
+                NodeDecision::Keep
+            ) {
+                ReportCounters::increment(&self.report.dropped_rules);
+                return false;
             }
+
+            self.sanitize_declaration_block_inner(
+                &mut rule.declarations,
+                PropertyLocation::PageMargin,
+                Some(RuleKind::Page),
+                depth + 1,
+            );
+            let keep = !rule.declarations.is_empty();
+            if !keep {
+                ReportCounters::increment(&self.report.dropped_rules);
+            }
+            keep
         });
     }
 
-    /// Runs the value guard over the declarations embedded in an `@container`
-    /// style query condition. `Not`/`Operation` are `#[skip_type]` in
-    /// lightningcss, so the tree is walked manually rather than via `Visit`.
+    fn condition_value_context(&self, depth: usize) -> ValueContext<'static> {
+        ValueContext {
+            property: None,
+            descriptor: None,
+            rule: Some(RuleKind::Container),
+            location: PropertyLocation::ContainerCondition,
+            depth,
+            important: false,
+        }
+    }
+
     fn container_condition_allowed(
         &self,
         condition: &mut ContainerCondition<'_>,
@@ -301,7 +398,7 @@ impl<'p> Engine<'p> {
                 .iter_mut()
                 .all(|condition| self.container_condition_allowed(condition, depth)),
             ContainerCondition::Unknown(tokens) => {
-                guard::token_list_allowed(tokens, self.policy, self.condition_value_ctx(depth))
+                guard::token_list_allowed(tokens, self.policy, self.condition_value_context(depth))
             }
             ContainerCondition::Feature(_) | ContainerCondition::ScrollState(_) => true,
         }
@@ -310,349 +407,469 @@ impl<'p> Engine<'p> {
     fn style_query_allowed(&self, query: &mut StyleQuery<'_>, depth: usize) -> bool {
         match query {
             StyleQuery::Declaration(property) => {
-                guard::property_allowed(property, self.policy, self.condition_value_ctx(depth))
+                let mut context = self.condition_value_context(depth);
+                context.property = Some(property.property_id());
+                guard::property_allowed(property, self.policy, context)
             }
             StyleQuery::Not(inner) => self.style_query_allowed(inner, depth),
             StyleQuery::Operation { conditions, .. } => conditions
                 .iter_mut()
-                .all(|query| self.style_query_allowed(query, depth)),
+                .all(|condition| self.style_query_allowed(condition, depth)),
             StyleQuery::Property(_) => true,
         }
     }
 
-    fn condition_value_ctx(&self, depth: usize) -> ValueContext {
-        ValueContext {
+    fn opaque_rule_allowed(
+        &self,
+        rule: &mut lightningcss::rules::unknown::UnknownAtRule<'_>,
+        depth: usize,
+    ) -> bool {
+        if !self.options.enforce_value_guard {
+            return true;
+        }
+        let context = ValueContext {
+            property: None,
+            descriptor: None,
+            rule: Some(RuleKind::Unknown),
+            location: PropertyLocation::OpaqueAtRule,
             depth,
             important: false,
-            location: ValueLocation::ContainerCondition,
+        };
+        let prelude_allowed =
+            guard::token_list_allowed(&mut rule.prelude, self.policy, context.clone());
+        let block_allowed = rule
+            .block
+            .as_mut()
+            .is_none_or(|block| guard::token_list_allowed(block, self.policy, context));
+        if !prelude_allowed || !block_allowed {
+            ReportCounters::increment(&self.report.rejected_values);
         }
+        prelude_allowed && block_allowed
     }
 
-    fn sanitize_rule_contents(&self, rule: &mut CssRule<'_>, ctx: RuleContext) -> bool {
+    fn sanitize_rule_contents(&self, rule: &mut CssRule<'_>, context: RuleContext) -> bool {
         match rule {
-            CssRule::Style(style_rule) => {
+            CssRule::Style(rule) => {
                 if !self.sanitize_selector_list(
-                    &mut style_rule.selectors,
+                    &mut rule.selectors,
+                    RuleKind::Style,
                     SelectorLocation::StyleRule,
-                    ctx.depth + 1,
+                    context.depth + 1,
                 ) {
                     return false;
                 }
-
                 self.sanitize_declaration_block_inner(
-                    &mut style_rule.declarations,
+                    &mut rule.declarations,
                     PropertyLocation::StyleRule,
-                    ctx.depth + 1,
+                    Some(RuleKind::Style),
+                    context.depth + 1,
                 );
-                self.sanitize_rule_list(&mut style_rule.rules.0, ctx.depth + 1);
+                self.sanitize_rule_list(&mut rule.rules.0, context.depth + 1);
             }
-            CssRule::Media(rule) => {
-                self.sanitize_rule_list(&mut rule.rules.0, ctx.depth + 1);
-            }
+            CssRule::Media(rule) => self.sanitize_rule_list(&mut rule.rules.0, context.depth + 1),
             CssRule::Keyframes(rule) => {
                 for keyframe in &mut rule.keyframes {
                     self.sanitize_declaration_block_inner(
                         &mut keyframe.declarations,
                         PropertyLocation::Keyframe,
-                        ctx.depth + 1,
+                        Some(RuleKind::Keyframes),
+                        context.depth + 1,
                     );
                 }
                 rule.keyframes
                     .retain(|keyframe| !keyframe.declarations.is_empty());
             }
             CssRule::FontFace(rule) => {
-                self.sanitize_font_face_properties(&mut rule.properties, ctx.depth + 1);
+                self.sanitize_font_face_properties(&mut rule.properties, context.depth + 1)
             }
-            CssRule::FontPaletteValues(rule) => {
-                self.sanitize_font_palette_values_properties(&mut rule.properties, ctx.depth + 1);
-            }
+            CssRule::FontPaletteValues(rule) => self
+                .sanitize_font_palette_values_properties(&mut rule.properties, context.depth + 1),
             CssRule::FontFeatureValues(rule) => {
-                match self.policy.visit_font_feature_values_rule(rule, ctx) {
-                    NodeAction::Drop => return false,
-                    NodeAction::Skip | NodeAction::Continue => {
-                        self.sanitize_font_feature_values_subrules(rule, ctx.depth + 1);
-                    }
-                }
+                self.sanitize_font_feature_values_subrules(rule, context.depth + 1)
             }
-            CssRule::Page(rule) => match self.policy.visit_page_rule(rule, ctx) {
-                NodeAction::Drop => return false,
-                NodeAction::Skip | NodeAction::Continue => {
-                    self.sanitize_declaration_block_inner(
-                        &mut rule.declarations,
-                        PropertyLocation::Page,
-                        ctx.depth + 1,
-                    );
-                    self.sanitize_page_margin_rules(&mut rule.rules, ctx.depth + 1);
-                }
-            },
+            CssRule::Page(rule) => {
+                self.sanitize_declaration_block_inner(
+                    &mut rule.declarations,
+                    PropertyLocation::Page,
+                    Some(RuleKind::Page),
+                    context.depth + 1,
+                );
+                self.sanitize_page_margin_rules(&mut rule.rules, context.depth + 1);
+            }
             CssRule::Supports(rule) => {
-                self.sanitize_rule_list(&mut rule.rules.0, ctx.depth + 1);
+                self.sanitize_rule_list(&mut rule.rules.0, context.depth + 1)
             }
-            CssRule::CounterStyle(rule) => match self.policy.visit_counter_style_rule(rule, ctx) {
-                NodeAction::Drop => return false,
-                NodeAction::Skip | NodeAction::Continue => {
-                    self.sanitize_declaration_block_inner(
-                        &mut rule.declarations,
-                        PropertyLocation::CounterStyle,
-                        ctx.depth + 1,
-                    );
-                }
-            },
+            CssRule::CounterStyle(rule) => self.sanitize_declaration_block_inner(
+                &mut rule.declarations,
+                PropertyLocation::CounterStyle,
+                Some(RuleKind::CounterStyle),
+                context.depth + 1,
+            ),
             CssRule::MozDocument(rule) => {
-                self.sanitize_rule_list(&mut rule.rules.0, ctx.depth + 1);
+                self.sanitize_rule_list(&mut rule.rules.0, context.depth + 1)
             }
             CssRule::Nesting(rule) => {
                 if !self.sanitize_selector_list(
                     &mut rule.style.selectors,
+                    RuleKind::Nesting,
                     SelectorLocation::Nesting,
-                    ctx.depth + 1,
+                    context.depth + 1,
                 ) {
                     return false;
                 }
-
-                self.sanitize_rule_list(&mut rule.style.rules.0, ctx.depth + 1);
+                self.sanitize_rule_list(&mut rule.style.rules.0, context.depth + 1);
                 self.sanitize_declaration_block_inner(
                     &mut rule.style.declarations,
                     PropertyLocation::StyleRule,
-                    ctx.depth + 1,
+                    Some(RuleKind::Nesting),
+                    context.depth + 1,
                 );
             }
-            CssRule::NestedDeclarations(rule) => {
-                self.sanitize_declaration_block_inner(
-                    &mut rule.declarations,
-                    PropertyLocation::NestedDeclarations,
-                    ctx.depth + 1,
-                );
+            CssRule::NestedDeclarations(rule) => self.sanitize_declaration_block_inner(
+                &mut rule.declarations,
+                PropertyLocation::NestedDeclarations,
+                Some(RuleKind::NestedDeclarations),
+                context.depth + 1,
+            ),
+            CssRule::Viewport(rule) => self.sanitize_declaration_block_inner(
+                &mut rule.declarations,
+                PropertyLocation::Viewport,
+                Some(RuleKind::Viewport),
+                context.depth + 1,
+            ),
+            CssRule::PositionTry(rule) => self.sanitize_declaration_block_inner(
+                &mut rule.declarations,
+                PropertyLocation::PositionTry,
+                Some(RuleKind::PositionTry),
+                context.depth + 1,
+            ),
+            CssRule::LayerBlock(rule) => {
+                self.sanitize_rule_list(&mut rule.rules.0, context.depth + 1)
             }
-            CssRule::Viewport(rule) => match self.policy.visit_viewport_rule(rule, ctx) {
-                NodeAction::Drop => return false,
-                NodeAction::Skip | NodeAction::Continue => {
-                    self.sanitize_declaration_block_inner(
-                        &mut rule.declarations,
-                        PropertyLocation::Viewport,
-                        ctx.depth + 1,
-                    );
-                }
-            },
-            CssRule::PositionTry(rule) => {
-                self.sanitize_declaration_block_inner(
-                    &mut rule.declarations,
-                    PropertyLocation::PositionTry,
-                    ctx.depth + 1,
-                );
-            }
-            CssRule::LayerBlock(rule) => self.sanitize_rule_list(&mut rule.rules.0, ctx.depth + 1),
             CssRule::Container(rule) => {
-                // The `@container` prelude can embed declarations inside style
-                // queries (`style(prop: value)`); guard their values and drop
-                // the whole rule if any is rejected.
-                if self.opts.enforce_value_guard
+                if self.options.enforce_value_guard
                     && let Some(condition) = &mut rule.condition
-                    && !self.container_condition_allowed(condition, ctx.depth + 1)
+                    && !self.container_condition_allowed(condition, context.depth + 1)
                 {
+                    ReportCounters::increment(&self.report.rejected_values);
                     return false;
                 }
-                self.sanitize_rule_list(&mut rule.rules.0, ctx.depth + 1);
+                self.sanitize_rule_list(&mut rule.rules.0, context.depth + 1);
             }
             CssRule::Scope(rule) => {
-                if let Some(scope_start) = &mut rule.scope_start
+                if let Some(start) = &mut rule.scope_start
                     && !self.sanitize_selector_list(
-                        scope_start,
-                        SelectorLocation::Scope,
-                        ctx.depth + 1,
+                        start,
+                        RuleKind::Scope,
+                        SelectorLocation::ScopeStart,
+                        context.depth + 1,
                     )
                 {
                     return false;
                 }
-                if let Some(scope_end) = &mut rule.scope_end
+                if let Some(end) = &mut rule.scope_end
                     && !self.sanitize_selector_list(
-                        scope_end,
-                        SelectorLocation::Scope,
-                        ctx.depth + 1,
+                        end,
+                        RuleKind::Scope,
+                        SelectorLocation::ScopeEnd,
+                        context.depth + 1,
                     )
                 {
                     return false;
                 }
-
-                self.sanitize_rule_list(&mut rule.rules.0, ctx.depth + 1);
+                self.sanitize_rule_list(&mut rule.rules.0, context.depth + 1);
             }
             CssRule::StartingStyle(rule) => {
-                self.sanitize_rule_list(&mut rule.rules.0, ctx.depth + 1)
+                self.sanitize_rule_list(&mut rule.rules.0, context.depth + 1)
             }
             CssRule::ViewTransition(rule) => {
-                self.sanitize_view_transition_properties(&mut rule.properties, ctx.depth + 1);
+                self.sanitize_view_transition_properties(&mut rule.properties, context.depth + 1)
             }
             CssRule::Property(rule) => {
-                // `@property` registers a custom property whose `initial-value`
-                // can carry a url that is later fetched via `var()`. The field is
-                // `#[skip_visit]`, so guard it explicitly.
-                if self.opts.enforce_value_guard
+                if self.options.enforce_value_guard
                     && let Some(initial_value) = &mut rule.initial_value
                     && !guard::parsed_component_allowed(
                         initial_value,
                         self.policy,
                         ValueContext {
-                            depth: ctx.depth + 1,
+                            property: None,
+                            descriptor: None,
+                            rule: Some(RuleKind::PropertyRegistration),
+                            location: PropertyLocation::PropertyInitialValue,
+                            depth: context.depth + 1,
                             important: false,
-                            location: ValueLocation::PropertyInitialValue,
                         },
                     )
                 {
+                    ReportCounters::increment(&self.report.rejected_values);
                     return false;
                 }
             }
             CssRule::Import(rule) => {
-                if self.opts.enforce_value_guard
-                    && matches!(
-                        self.policy.check_resource(
-                            ResourceRef::literal(ResourceKind::Import, rule.url.as_ref()),
-                            ValueContext {
-                                depth: ctx.depth + 1,
-                                important: false,
-                                location: ValueLocation::ImportRule,
-                            },
-                        ),
-                        ValueAction::Deny
-                    )
-                {
-                    return false;
-                }
+                return matches!(
+                    self.policy.import(ImportContext {
+                        url: rule.url.as_ref(),
+                        depth: context.depth + 1,
+                    }),
+                    ImportDecision::AllowPassthrough
+                );
             }
+            CssRule::Unknown(rule) => {
+                return self.opaque_rule_allowed(rule, context.depth + 1);
+            }
+            // The public sanitizer accepts lightningcss's default at-rule type.
+            // A `Custom(DefaultAtRule)` has no inspectable payload and cannot be
+            // serialized successfully, so it is never retained.
+            CssRule::Custom(_) => return false,
             CssRule::Namespace(_)
             | CssRule::CustomMedia(_)
             | CssRule::LayerStatement(_)
-            | CssRule::Ignored
-            | CssRule::Unknown(_)
-            | CssRule::Custom(_) => {}
+            | CssRule::Ignored => {}
         }
-
         true
     }
 
     fn sanitize_rule_list(&self, rules: &mut Vec<CssRule<'_>>, depth: usize) {
-        // Fail-closed depth cap: drop any subtree nested deeper than configured
-        // to bound recursion against stack-overflow denial of service.
-        if depth > self.opts.max_depth {
+        if depth > self.options.max_traversal_depth {
+            self.report
+                .dropped_rules
+                .set(self.report.dropped_rules.get() + rules.len());
             rules.clear();
             return;
         }
 
         rules.retain_mut(|rule| {
-            let ctx = RuleContext { depth };
-
-            match self.policy.visit_rule(rule, ctx) {
-                NodeAction::Drop => false,
-                NodeAction::Skip | NodeAction::Continue => {
-                    self.sanitize_rule_contents(rule, ctx) && !is_rule_empty(rule)
-                }
+            let context = RuleContext {
+                kind: RuleKind::of(rule),
+                depth,
+            };
+            if !matches!(self.policy.rule(rule, context.clone()), NodeDecision::Keep) {
+                ReportCounters::increment(&self.report.dropped_rules);
+                return false;
             }
+            let keep = self.sanitize_rule_contents(rule, context) && !is_rule_empty(rule);
+            if !keep {
+                ReportCounters::increment(&self.report.dropped_rules);
+            }
+            keep
         });
     }
+
+    fn report(&self) -> SanitizeReport {
+        self.report.finish()
+    }
 }
 
-/// Sanitizes a parsed declaration block in place using default options.
 pub fn sanitize_declaration_block_ast(
     block: &mut DeclarationBlock<'_>,
-    policy: &dyn CssSanitizationPolicy,
-) {
-    sanitize_declaration_block_ast_with_options(block, policy, SanitizeOptions::default());
+    policy: &dyn CssPolicy,
+) -> SanitizeReport {
+    sanitize_declaration_block_ast_with_options(block, policy, SanitizeOptions::default())
 }
 
-/// Sanitizes a parsed declaration block in place with custom options.
 pub fn sanitize_declaration_block_ast_with_options(
     block: &mut DeclarationBlock<'_>,
-    policy: &dyn CssSanitizationPolicy,
+    policy: &dyn CssPolicy,
     options: SanitizeOptions,
-) {
-    let engine = Engine {
-        policy,
-        opts: options,
-    };
-    engine.sanitize_declaration_block_inner(block, PropertyLocation::DeclarationList, 0);
+) -> SanitizeReport {
+    let engine = Engine::new(policy, options);
+    engine.sanitize_declaration_block_inner(block, PropertyLocation::DeclarationList, None, 0);
+    engine.report()
 }
 
-/// Sanitizes a parsed stylesheet AST in place using default options.
 pub fn sanitize_stylesheet_ast(
     stylesheet: &mut StyleSheet<'_>,
-    policy: &dyn CssSanitizationPolicy,
-) {
-    sanitize_stylesheet_ast_with_options(stylesheet, policy, SanitizeOptions::default());
+    policy: &dyn CssPolicy,
+) -> SanitizeReport {
+    sanitize_stylesheet_ast_with_options(stylesheet, policy, SanitizeOptions::default())
 }
 
-/// Sanitizes a parsed stylesheet AST in place with custom options.
 pub fn sanitize_stylesheet_ast_with_options(
     stylesheet: &mut StyleSheet<'_>,
-    policy: &dyn CssSanitizationPolicy,
+    policy: &dyn CssPolicy,
     options: SanitizeOptions,
-) {
-    let engine = Engine {
-        policy,
-        opts: options,
-    };
+) -> SanitizeReport {
+    let engine = Engine::new(policy, options);
     engine.sanitize_rule_list(&mut stylesheet.rules.0, 0);
+    engine.report()
 }
 
-/// Parses and sanitizes an inline declaration list with a custom AST policy.
-pub fn clean_declaration_list_with_policy(
+pub fn sanitize_declaration_list(
     input: &str,
-    policy: &dyn CssSanitizationPolicy,
-) -> String {
-    clean_declaration_list_with_policy_and_options(input, policy, SanitizeOptions::default())
+    policy: &dyn CssPolicy,
+) -> Result<SanitizeOutput, SanitizeError> {
+    sanitize_declaration_list_with_options(input, policy, SanitizeOptions::default())
 }
 
-/// Parses and sanitizes an inline declaration list with a custom AST policy and
-/// options.
-pub fn clean_declaration_list_with_policy_and_options(
+pub fn sanitize_declaration_list_with_options(
     input: &str,
-    policy: &dyn CssSanitizationPolicy,
+    policy: &dyn CssPolicy,
     options: SanitizeOptions,
-) -> String {
+) -> Result<SanitizeOutput, SanitizeError> {
+    enforce_parse_limits(input, options.parse_limits)?;
+    let parse_limits = options.parse_limits;
     let parser_options = ParserOptions {
-        error_recovery: true,
+        error_recovery: options.error_recovery,
+        flags: options.parser_flags.clone(),
         ..ParserOptions::default()
     };
-
-    let Ok(mut block) = DeclarationBlock::parse_string(input, parser_options) else {
-        return String::new();
+    let mut block = DeclarationBlock::parse_string(input, parser_options)
+        .map_err(|error| SanitizeError::Parse(error.to_string()))?;
+    let report = sanitize_declaration_block_ast_with_options(&mut block, policy, options);
+    let css = if block.is_empty() {
+        String::new()
+    } else {
+        serialize_declaration_block(&block)?
     };
-
-    sanitize_declaration_block_ast_with_options(&mut block, policy, options);
-
-    if block.is_empty() {
-        return String::new();
-    }
-
-    serialize_declaration_block(&block).unwrap_or_default()
+    validate_output_size(&css, parse_limits)?;
+    Ok(SanitizeOutput {
+        css: SanitizedCss::new(css),
+        report,
+    })
 }
 
-/// Parses and sanitizes a full stylesheet with a custom AST policy.
-pub fn clean_stylesheet_with_policy(input: &str, policy: &dyn CssSanitizationPolicy) -> String {
-    clean_stylesheet_with_policy_and_options(input, policy, SanitizeOptions::default())
-}
-
-/// Parses and sanitizes a full stylesheet with a custom AST policy and options.
-pub fn clean_stylesheet_with_policy_and_options(
+pub fn sanitize_stylesheet(
     input: &str,
-    policy: &dyn CssSanitizationPolicy,
+    policy: &dyn CssPolicy,
+) -> Result<SanitizeOutput, SanitizeError> {
+    sanitize_stylesheet_with_options(input, policy, SanitizeOptions::default())
+}
+
+pub fn sanitize_stylesheet_with_options(
+    input: &str,
+    policy: &dyn CssPolicy,
     options: SanitizeOptions,
-) -> String {
+) -> Result<SanitizeOutput, SanitizeError> {
+    enforce_parse_limits(input, options.parse_limits)?;
+    let parse_limits = options.parse_limits;
     let parser_options = ParserOptions {
-        error_recovery: true,
+        error_recovery: options.error_recovery,
+        flags: options.parser_flags.clone(),
         ..ParserOptions::default()
     };
-
-    let Ok(mut stylesheet) = StyleSheet::parse(input, parser_options) else {
-        return String::new();
+    let mut stylesheet = StyleSheet::parse(input, parser_options)
+        .map_err(|error| SanitizeError::Parse(error.to_string()))?;
+    let report = sanitize_stylesheet_ast_with_options(&mut stylesheet, policy, options);
+    let css = if stylesheet.rules.0.is_empty() {
+        String::new()
+    } else {
+        stylesheet
+            .to_css(PrinterOptions::default())
+            .map_err(|error| SanitizeError::Serialize(error.to_string()))?
+            .code
     };
+    validate_output_size(&css, parse_limits)?;
+    Ok(SanitizeOutput {
+        css: SanitizedCss::new(css),
+        report,
+    })
+}
 
-    sanitize_stylesheet_ast_with_options(&mut stylesheet, policy, options);
+fn validate_output_size(output: &str, limits: ParseLimits) -> Result<(), SanitizeError> {
+    if output.len() > limits.max_output_bytes {
+        return Err(SanitizeError::OutputTooLarge {
+            actual: output.len(),
+            max: limits.max_output_bytes,
+        });
+    }
+    Ok(())
+}
 
-    if stylesheet.rules.0.is_empty() {
-        return String::new();
+fn enforce_parse_limits(input: &str, limits: ParseLimits) -> Result<(), SanitizeError> {
+    if input.len() > limits.max_input_bytes {
+        return Err(SanitizeError::InputTooLarge {
+            actual: input.len(),
+            max: limits.max_input_bytes,
+        });
     }
 
-    match stylesheet.to_css(PrinterOptions::default()) {
-        Ok(result) => result.code,
-        Err(_) => String::new(),
+    #[derive(Clone, Copy)]
+    enum State {
+        Normal,
+        SingleQuoted,
+        DoubleQuoted,
+        Comment,
+    }
+
+    let bytes = input.as_bytes();
+    let mut state = State::Normal;
+    let mut depth = 0usize;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        match state {
+            State::Normal => match byte {
+                b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                    state = State::Comment;
+                    index += 1;
+                }
+                b'\'' => state = State::SingleQuoted,
+                b'"' => state = State::DoubleQuoted,
+                b'\\' => index += usize::from(index + 1 < bytes.len()),
+                b'(' | b'[' | b'{' => {
+                    depth += 1;
+                    if depth > limits.max_nesting_depth {
+                        return Err(SanitizeError::NestingTooDeep {
+                            max: limits.max_nesting_depth,
+                        });
+                    }
+                }
+                b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+                _ => {}
+            },
+            State::SingleQuoted => match byte {
+                b'\\' => index += usize::from(index + 1 < bytes.len()),
+                b'\'' => state = State::Normal,
+                _ => {}
+            },
+            State::DoubleQuoted => match byte {
+                b'\\' => index += usize::from(index + 1 < bytes.len()),
+                b'"' => state = State::Normal,
+                _ => {}
+            },
+            State::Comment => {
+                if byte == b'*' && bytes.get(index + 1) == Some(&b'/') {
+                    state = State::Normal;
+                    index += 1;
+                }
+            }
+        }
+        index += 1;
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_limit_ignores_delimiters_in_strings_and_comments() {
+        let input = r#".x { content: \"((((\"; /* {{{{ */ color: red }"#;
+        assert!(enforce_parse_limits(input, ParseLimits::default()).is_ok());
+    }
+
+    #[test]
+    fn parse_limit_rejects_known_recursive_parser_shapes() {
+        let inputs = [
+            format!("{}a{}{{color:red}}", ":is(".repeat(129), ")".repeat(129)),
+            format!("{}a{}{{color:red}}", ":not(".repeat(129), ")".repeat(129)),
+            format!("{}color:red{}", "a{".repeat(129), "}".repeat(129)),
+            format!(
+                "{}a{{color:red}}{}",
+                "@media all{".repeat(129),
+                "}".repeat(129)
+            ),
+            format!("width:{}1px{}", "calc(".repeat(129), ")".repeat(129)),
+            format!("width:{}1px{}", "min(".repeat(129), ")".repeat(129)),
+        ];
+
+        for input in inputs {
+            assert_eq!(
+                enforce_parse_limits(&input, ParseLimits::default()),
+                Err(SanitizeError::NestingTooDeep { max: 128 })
+            );
+        }
     }
 }

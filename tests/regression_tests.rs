@@ -1,421 +1,321 @@
-//! Regressions for the deny-by-default redesign.
+//! Security regressions for the typed 0.5 policy API.
 
 mod common;
 
 use std::cell::Cell;
 
+use common::{NoGlobalSelectors, declaration_css, style_policy, stylesheet_css};
+use css_sanitizer::lightningcss::properties::Property;
+use css_sanitizer::lightningcss::properties::custom::TokenOrValue;
 use css_sanitizer::lightningcss::rules::CssRule;
-use css_sanitizer::lightningcss::rules::font_face::FontFaceProperty;
-use css_sanitizer::lightningcss::selector::{Component, SelectorList};
 use css_sanitizer::{
-    CssSanitizationPolicy, DescriptorContext, NodeAction, PropertyContext, RuleContext,
-    SanitizeOptions, SelectorContext, StrictPolicy, ValueAction, ValueContext, ValueLocation,
-    clean_declaration_list_with_policy, clean_declaration_list_with_policy_and_options,
-    clean_stylesheet_with_policy, clean_stylesheet_with_policy_and_options,
+    CssPolicy, NodeDecision, ParseLimits, PropertyContext, PropertyLocation, ResourceRef,
+    RuleContext, RuleKind, SanitizeError, SanitizeOptions, SelectorContext, ValueContext,
+    ValueDecision, sanitize_declaration_list_with_options, sanitize_stylesheet,
+    sanitize_stylesheet_with_options,
 };
 
-/// Allows `@scope`/style rules and all declarations, but drops any selector list
-/// that references the `html` element — including `@scope` prelude selectors.
-struct DropHtmlSelectors;
-
-impl CssSanitizationPolicy for DropHtmlSelectors {
-    fn visit_rule(&self, rule: &mut CssRule<'_>, _ctx: RuleContext) -> NodeAction {
-        match rule {
-            CssRule::Scope(_) | CssRule::Style(_) => NodeAction::Continue,
-            _ => NodeAction::Drop,
-        }
+#[test]
+fn scope_start_and_end_selectors_are_both_policed() {
+    for css in [
+        "@scope (html) to (.limit) { .card { color: red } }",
+        "@scope (.root) to (html) { .card { color: red } }",
+    ] {
+        assert!(stylesheet_css(css, &NoGlobalSelectors).is_empty(), "{css}");
     }
 
-    fn visit_property(
-        &self,
-        _property: &mut css_sanitizer::lightningcss::properties::Property<'_>,
-        _ctx: PropertyContext,
-    ) -> NodeAction {
-        NodeAction::Continue
-    }
-
-    fn visit_selector_list(
-        &self,
-        selectors: &mut SelectorList<'_>,
-        _ctx: SelectorContext,
-    ) -> NodeAction {
-        let has_html = selectors.0.iter().any(|selector| {
-            selector.iter_raw_match_order().any(|component| {
-                matches!(component, Component::LocalName(name) if name.lower_name.0 == "html")
-            })
-        });
-
-        if has_html {
-            NodeAction::Drop
-        } else {
-            NodeAction::Continue
-        }
-    }
-
-    fn check_url(
-        &self,
-        _url: &css_sanitizer::lightningcss::values::url::Url<'_>,
-        _ctx: ValueContext,
-    ) -> ValueAction {
-        ValueAction::Allow
-    }
-}
-
-#[test]
-fn scope_start_selector_is_policed() {
-    // The `html` in the `@scope` prelude must be subject to the selector hook;
-    // before the fix it was never visited and the rule survived.
-    let result = clean_stylesheet_with_policy(
-        "@scope (html) to (.x) { .a { color: red } }",
-        &DropHtmlSelectors,
+    let safe = stylesheet_css(
+        "@scope (.root) to (.limit) { .card { color: red } }",
+        &NoGlobalSelectors,
     );
-    assert!(result.is_empty(), "got: {result:?}");
+    assert!(safe.contains("color"));
 }
 
 #[test]
-fn scope_end_selector_is_policed() {
-    let result = clean_stylesheet_with_policy(
-        "@scope (.ok) to (html) { .a { color: red } }",
-        &DropHtmlSelectors,
-    );
-    assert!(result.is_empty(), "got: {result:?}");
-}
-
-#[test]
-fn scope_with_safe_prelude_is_kept() {
-    let result = clean_stylesheet_with_policy(
-        "@scope (.ok) to (.limit) { .a { color: red } }",
-        &DropHtmlSelectors,
-    );
-    assert!(result.contains("color"), "got: {result:?}");
-}
-
-#[test]
-fn font_face_src_url_is_denied_by_default() {
-    let result = clean_stylesheet_with_policy(
-        "@font-face { font-family: x; src: url('https://evil.test/f.woff2') }",
-        &StrictPolicy::new().allow_rules(&["font-face"]),
-    );
-    assert!(!result.contains("url("), "got: {result:?}");
-    assert!(result.contains("font-family"), "got: {result:?}");
-}
-
-#[test]
-fn font_face_src_url_is_kept_when_url_allowed() {
-    let result = clean_stylesheet_with_policy(
-        "@font-face { src: url('https://example.com/f.woff2') }",
-        &StrictPolicy::new().allow_rules(&["font-face"]).allow_url(),
-    );
-    assert!(result.contains("url("), "got: {result:?}");
-}
-
-#[test]
-fn custom_property_url_is_denied_by_default() {
-    let result = clean_declaration_list_with_policy(
-        "--brand: url('https://evil.test/x.png')",
-        &StrictPolicy::new().allow_properties(&["--brand"]),
-    );
-    assert!(result.is_empty(), "got: {result:?}");
-}
-
-#[test]
-fn depth_cap_drops_overly_nested_rules() {
+fn traversal_depth_cap_fails_closed_after_parsing() {
     let mut input = String::new();
     for _ in 0..8 {
-        input.push_str("@media all{");
+        input.push_str("@media all {");
     }
-    input.push_str(".x{color:red}");
+    input.push_str(".card { color: red }");
     for _ in 0..8 {
         input.push('}');
     }
 
-    let policy = StrictPolicy::new()
-        .allow_rules(&["media"])
-        .allow_properties(&["color"]);
-
-    // Default depth keeps the whole thing.
-    let full = clean_stylesheet_with_policy(&input, &policy);
-    assert!(full.contains("color"), "got: {full:?}");
-
-    // A small cap drops the deeply nested content (fail-closed).
-    let capped = clean_stylesheet_with_policy_and_options(
+    let policy = style_policy(&["color"]).allow_rules(&[RuleKind::Media]);
+    let output = sanitize_stylesheet_with_options(
         &input,
         &policy,
-        SanitizeOptions::default().with_max_depth(3),
-    );
-    assert!(!capped.contains("color"), "got: {capped:?}");
+        SanitizeOptions::default().with_max_traversal_depth(3),
+    )
+    .expect("stylesheet should sanitize");
+    assert!(!output.css.as_str().contains("color"));
+    assert!(output.report.dropped_rules > 0);
 }
 
 #[test]
-fn container_style_query_url_is_denied_by_default() {
-    // `@container style(background: url(...))` embeds a declaration in the
-    // prelude; before the fix its url bypassed the value guard entirely.
-    let result = clean_stylesheet_with_policy(
-        "@container style(background: url(https://evil.test/c.png)) { .a { color: red } }",
-        &StrictPolicy::new()
-            .allow_rules(&["container"])
-            .allow_properties(&["color", "background"]),
+fn parser_nesting_limit_rejects_known_stack_overflow_shape_before_parse() {
+    let input = format!(
+        "{}a{}{{color:red}}",
+        ":is(".repeat(2_000),
+        ")".repeat(2_000)
     );
-    assert!(!result.contains("url("), "got: {result:?}");
-    assert!(!result.contains("evil"), "got: {result:?}");
+    let error = sanitize_stylesheet(&input, &style_policy(&["color"]))
+        .expect_err("pathological selector must be rejected");
+    assert_eq!(error, SanitizeError::NestingTooDeep { max: 128 });
 }
 
 #[test]
-fn container_style_query_is_kept_when_url_allowed() {
-    let result = clean_stylesheet_with_policy(
-        "@container style(background: url(https://example.com/c.png)) { .a { color: red } }",
-        &StrictPolicy::new()
-            .allow_rules(&["container"])
-            .allow_properties(&["color", "background"])
-            .allow_url(),
-    );
-    assert!(result.contains("color"), "got: {result:?}");
+fn parser_limit_scanner_ignores_delimiters_in_strings_comments_and_escapes() {
+    let input = r#".card { content: "(({{"; --raw: \(; /* ((( {{{ */ color: red }"#;
+    let policy = style_policy(&["content", "--raw", "color"]);
+    let output = sanitize_stylesheet(input, &policy).expect("safe delimiters should parse");
+    assert!(output.css.as_str().contains("color"));
 }
 
 #[test]
-fn container_nested_condition_url_is_denied() {
-    // `not()` and `and`/`or` operations are `#[skip_type]` in lightningcss, so the
-    // condition tree is walked manually; verify urls nested inside them are caught.
+fn input_and_output_byte_limits_return_typed_errors() {
+    let input_error = sanitize_declaration_list_with_options(
+        "color: red",
+        &css_sanitizer::StrictPolicy::new().allow_properties(&["color"]),
+        SanitizeOptions::default()
+            .with_parse_limits(ParseLimits::default().with_max_input_bytes(2)),
+    )
+    .expect_err("input limit must be enforced");
+    assert_eq!(
+        input_error,
+        SanitizeError::InputTooLarge { actual: 10, max: 2 }
+    );
+
+    let output_error = sanitize_declaration_list_with_options(
+        "color: red",
+        &css_sanitizer::StrictPolicy::new().allow_properties(&["color"]),
+        SanitizeOptions::default()
+            .with_parse_limits(ParseLimits::default().with_max_output_bytes(2)),
+    )
+    .expect_err("output limit must be enforced");
+    assert!(matches!(
+        output_error,
+        SanitizeError::OutputTooLarge { max: 2, .. }
+    ));
+}
+
+#[test]
+fn strict_parsing_surfaces_invalid_css_instead_of_recovering() {
+    let error = sanitize_stylesheet_with_options(
+        ".card { color: red; broken }",
+        &style_policy(&["color"]),
+        SanitizeOptions::default().with_strict_parsing(),
+    )
+    .expect_err("strict parsing should reject the malformed declaration");
+    assert!(matches!(error, SanitizeError::Parse(_)));
+}
+
+#[test]
+fn container_style_queries_do_not_bypass_resource_guard() {
     for css in [
-        "@container not (style(background: url(https://evil.test/c.png))) { .a { color: red } }",
-        "@container style(color: red) and style(background: url(https://evil.test/c.png)) { .a { color: red } }",
+        "@container style(background: url('https://example.test/a.png')) { .card { color: red } }",
+        "@container not (style(background: url('https://example.test/a.png'))) { .card { color: red } }",
+        "@container style(color: red) and style(background: url('https://example.test/a.png')) { .card { color: red } }",
     ] {
-        let result = clean_stylesheet_with_policy(
-            css,
-            &StrictPolicy::new()
-                .allow_rules(&["container"])
-                .allow_properties(&["color", "background"]),
-        );
-        assert!(!result.contains("evil"), "css={css} got: {result:?}");
+        let policy = style_policy(&["color", "background"]).allow_rules(&[RuleKind::Container]);
+        let output = stylesheet_css(css, &policy);
+        assert!(!output.contains("example.test"), "{css} -> {output}");
     }
 }
 
 #[test]
-fn property_initial_value_url_is_denied_by_default() {
-    // `@property` `initial-value` can carry a url later fetched via `var()`.
-    let result = clean_stylesheet_with_policy(
-        "@property --x { syntax: '<image>'; inherits: false; initial-value: url(https://evil.test/p.png) }",
-        &StrictPolicy::new().allow_rules(&["property"]),
+fn property_registration_initial_value_is_guarded() {
+    let css = stylesheet_css(
+        "@property --asset { syntax: '<image>'; inherits: false; initial-value: url('https://example.test/a.png') }",
+        &css_sanitizer::StrictPolicy::new().allow_rules(&[RuleKind::PropertyRegistration]),
     );
-    assert!(!result.contains("url("), "got: {result:?}");
-    assert!(!result.contains("evil"), "got: {result:?}");
+    assert!(css.is_empty());
 }
 
 #[test]
-fn raw_unquoted_url_token_is_denied_by_default() {
-    // Exercises the `check_token` backstop for raw url tokens.
-    let result = clean_declaration_list_with_policy(
-        "--brand: url(evil.png)",
-        &StrictPolicy::new().allow_properties(&["--brand"]),
-    );
-    assert!(result.is_empty(), "got: {result:?}");
-}
-
-#[test]
-fn env_is_kept_when_env_allowed() {
-    let result = clean_declaration_list_with_policy(
-        "padding: env(safe-area-inset-left)",
-        &StrictPolicy::new()
-            .allow_properties(&["padding"])
-            .allow_env(),
-    );
-    assert!(result.contains("env("), "got: {result:?}");
-}
-
-#[test]
-fn depth_cap_applies_to_nested_style_rules() {
-    let mut input = String::new();
-    for i in 0..8 {
-        input.push_str(&format!(".l{i} {{ "));
-    }
-    input.push_str("color: red");
-    for _ in 0..8 {
-        input.push_str(" }");
-    }
-
-    let policy = StrictPolicy::new().allow_properties(&["color"]);
-
-    let capped = clean_stylesheet_with_policy_and_options(
-        &input,
-        &policy,
-        SanitizeOptions::default().with_max_depth(3),
-    );
-    assert!(!capped.contains("color"), "got: {capped:?}");
-}
-
-#[test]
-fn value_guard_can_be_disabled() {
-    let result = clean_declaration_list_with_policy_and_options(
-        "background-image: url('x.png')",
-        &StrictPolicy::new().allow_properties(&["background-image"]),
-        SanitizeOptions::default().with_value_guard(false),
-    );
-    assert!(result.contains("url("), "got: {result:?}");
-}
-
-struct SkipCannotBypassGuard;
-
-impl CssSanitizationPolicy for SkipCannotBypassGuard {
-    fn visit_rule(&self, rule: &mut CssRule<'_>, _ctx: RuleContext) -> NodeAction {
-        if matches!(
-            rule,
-            CssRule::Style(_) | CssRule::FontFace(_) | CssRule::Import(_)
-        ) {
-            NodeAction::Skip
-        } else {
-            NodeAction::Drop
-        }
-    }
-
-    fn visit_selector_list(
-        &self,
-        _selectors: &mut SelectorList<'_>,
-        _ctx: SelectorContext,
-    ) -> NodeAction {
-        NodeAction::Skip
-    }
-
-    fn visit_property(
-        &self,
-        _property: &mut css_sanitizer::lightningcss::properties::Property<'_>,
-        _ctx: PropertyContext,
-    ) -> NodeAction {
-        NodeAction::Skip
-    }
-
-    fn visit_font_face_property(
-        &self,
-        _property: &mut FontFaceProperty<'_>,
-        _ctx: DescriptorContext,
-    ) -> NodeAction {
-        NodeAction::Skip
-    }
-}
-
-#[test]
-fn skip_cannot_bypass_property_resource_guard() {
-    let result = clean_stylesheet_with_policy(
-        ".a { color: red; background-image: url('https://evil.test/a.png') }",
-        &SkipCannotBypassGuard,
-    );
-
-    assert!(result.contains("color"), "got: {result:?}");
-    assert!(!result.contains("evil.test"), "got: {result:?}");
-    assert!(!result.contains("url("), "got: {result:?}");
-}
-
-#[test]
-fn skip_cannot_bypass_descriptor_resource_guard() {
-    let result = clean_stylesheet_with_policy(
-        "@font-face { font-family: Test; src: url('https://evil.test/a.woff2') }",
-        &SkipCannotBypassGuard,
-    );
-
-    assert!(result.contains("font-family"), "got: {result:?}");
-    assert!(!result.contains("evil.test"), "got: {result:?}");
-    assert!(!result.contains("url("), "got: {result:?}");
-}
-
-#[test]
-fn skip_cannot_bypass_import_resource_guard() {
-    let result = clean_stylesheet_with_policy(
-        "@import 'https://evil.test/theme.css';",
-        &SkipCannotBypassGuard,
-    );
-
-    assert!(result.is_empty(), "got: {result:?}");
-}
-
-#[test]
-fn position_try_declarations_are_filtered_and_resource_guarded() {
-    let result = clean_stylesheet_with_policy(
-        "@position-try --fallback { top: 10px; background-image: url('https://evil.test/p.png') }",
-        &StrictPolicy::new()
-            .allow_rules(&["position-try"])
-            .allow_properties(&["top", "background-image"]),
-    );
-
-    assert!(result.contains("@position-try"), "got: {result:?}");
-    assert!(result.contains("top"), "got: {result:?}");
-    assert!(!result.contains("evil.test"), "got: {result:?}");
+fn dangerous_guard_opt_out_is_explicit_and_effective() {
+    let output = sanitize_declaration_list_with_options(
+        "background-image: url('image.png')",
+        &css_sanitizer::StrictPolicy::new().allow_properties(&["background-image"]),
+        SanitizeOptions::default().dangerously_disable_value_guard(),
+    )
+    .expect("declaration should sanitize");
+    assert!(output.css.as_str().contains("url("));
 }
 
 #[derive(Default)]
-struct PositionTryHookPolicy {
-    property_hook_called: Cell<bool>,
-    resource_location: Cell<Option<ValueLocation>>,
+struct PositionContextRecorder {
+    property_called: Cell<bool>,
+    resource_location: Cell<Option<PropertyLocation>>,
 }
 
-impl CssSanitizationPolicy for PositionTryHookPolicy {
-    fn visit_rule(&self, rule: &mut CssRule<'_>, _ctx: RuleContext) -> NodeAction {
-        if matches!(rule, CssRule::PositionTry(_)) {
-            NodeAction::Continue
+impl CssPolicy for PositionContextRecorder {
+    fn rule(&self, _rule: &mut CssRule<'_>, context: RuleContext) -> NodeDecision {
+        if context.kind == RuleKind::PositionTry {
+            NodeDecision::Keep
         } else {
-            NodeAction::Drop
+            NodeDecision::Drop
         }
     }
 
-    fn visit_property(
-        &self,
-        _property: &mut css_sanitizer::lightningcss::properties::Property<'_>,
-        _ctx: PropertyContext,
-    ) -> NodeAction {
-        NodeAction::Drop
+    fn property(&self, _property: &mut Property<'_>, context: PropertyContext<'_>) -> NodeDecision {
+        self.property_called
+            .set(context.location == PropertyLocation::PositionTry);
+        NodeDecision::Keep
     }
 
-    fn visit_position_try_property(
-        &self,
-        _property: &mut css_sanitizer::lightningcss::properties::Property<'_>,
-        _ctx: PropertyContext,
-    ) -> NodeAction {
-        self.property_hook_called.set(true);
-        NodeAction::Continue
+    fn resource(&self, _resource: ResourceRef<'_>, context: &ValueContext<'_>) -> ValueDecision {
+        self.resource_location.set(Some(context.location));
+        ValueDecision::Allow
     }
 
-    fn check_resource(
-        &self,
-        _resource: css_sanitizer::ResourceRef<'_>,
-        ctx: ValueContext,
-    ) -> ValueAction {
-        self.resource_location.set(Some(ctx.location));
-        ValueAction::Allow
+    fn token(&self, _token: &TokenOrValue<'_>, _context: &ValueContext<'_>) -> ValueDecision {
+        ValueDecision::Allow
     }
 }
 
 #[test]
-fn position_try_uses_dedicated_property_hook_and_value_location() {
-    let policy = PositionTryHookPolicy::default();
-    let result = clean_stylesheet_with_policy(
+fn position_try_uses_typed_property_and_value_context() {
+    let policy = PositionContextRecorder::default();
+    let css = stylesheet_css(
         "@position-try --fallback { background-image: url('fallback.png') }",
         &policy,
     );
-
-    assert!(policy.property_hook_called.get());
+    assert!(policy.property_called.get());
     assert_eq!(
         policy.resource_location.get(),
-        Some(ValueLocation::PositionTry)
+        Some(PropertyLocation::PositionTry)
     );
-    assert!(result.contains("fallback.png"), "got: {result:?}");
+    assert!(css.contains("fallback.png"));
+}
+
+struct OpaqueRulePolicy {
+    allow_resources: bool,
+}
+
+impl CssPolicy for OpaqueRulePolicy {
+    fn rule(&self, _rule: &mut CssRule<'_>, context: RuleContext) -> NodeDecision {
+        if context.kind == RuleKind::Unknown {
+            NodeDecision::Keep
+        } else {
+            NodeDecision::Drop
+        }
+    }
+
+    fn resource(&self, _resource: ResourceRef<'_>, _context: &ValueContext<'_>) -> ValueDecision {
+        if self.allow_resources {
+            ValueDecision::Allow
+        } else {
+            ValueDecision::Deny
+        }
+    }
+
+    fn token(&self, _token: &TokenOrValue<'_>, _context: &ValueContext<'_>) -> ValueDecision {
+        ValueDecision::Allow
+    }
 }
 
 #[test]
-fn empty_position_try_rule_is_pruned() {
-    let result = clean_stylesheet_with_policy(
-        "@position-try --fallback { background-image: url('https://evil.test/p.png') }",
-        &StrictPolicy::new()
-            .allow_rules(&["position-try"])
-            .allow_properties(&["background-image"]),
+fn unknown_at_rule_payload_always_crosses_the_value_guard() {
+    let safe = stylesheet_css(
+        "@future-rule mode { payload: safe }",
+        &OpaqueRulePolicy {
+            allow_resources: false,
+        },
     );
+    assert!(safe.contains("@future-rule"));
 
-    assert!(result.is_empty(), "got: {result:?}");
+    let denied = stylesheet_css(
+        "@future-rule url('https://example.test/a') { payload: safe }",
+        &OpaqueRulePolicy {
+            allow_resources: false,
+        },
+    );
+    assert!(denied.is_empty());
+
+    let explicitly_allowed = stylesheet_css(
+        "@future-rule url('https://example.test/a') { payload: safe }",
+        &OpaqueRulePolicy {
+            allow_resources: true,
+        },
+    );
+    assert!(explicitly_allowed.contains("example.test"));
 }
 
 #[test]
-fn strict_policy_never_allows_unknown_at_rules_by_category() {
-    let result = clean_stylesheet_with_policy(
-        "@future-resource 'https://evil.test/x' { payload: yes }",
-        &StrictPolicy::new().allow_rules(&["unknown"]),
+fn strict_preset_cannot_enable_opaque_rules() {
+    let css = stylesheet_css(
+        "@future-rule mode { payload: safe }",
+        &css_sanitizer::StrictPolicy::new().allow_rules(&[RuleKind::Unknown]),
     );
+    assert!(css.is_empty());
+}
 
-    assert!(result.is_empty(), "got: {result:?}");
+#[test]
+fn style_element_output_does_not_contain_an_html_end_tag() {
+    let output = sanitize_stylesheet(
+        r#".card { font-family: "</StYlE><script>ignored()</script>" }"#,
+        &style_policy(&["font-family"]),
+    )
+    .expect("stylesheet should sanitize");
+    let html_text = output.css.to_style_element_text();
+    assert!(!html_text.to_ascii_lowercase().contains("</style"));
+    assert!(html_text.contains(r"<\/StYlE"));
+    sanitize_stylesheet(&html_text, &style_policy(&["font-family"]))
+        .expect("HTML-safe output must remain valid CSS");
+}
+
+#[test]
+fn malformed_declaration_list_cannot_escape_into_a_rule() {
+    let css = declaration_css(
+        "color: red; } .owned { background-image: url('https://example.test/a.png') }",
+        &css_sanitizer::StrictPolicy::new().allow_properties(&["color", "background-image"]),
+    );
+    assert_eq!(css, "color: red");
+}
+
+#[test]
+fn selector_policy_is_independent_from_property_and_resource_permissions() {
+    struct DropEverySelector;
+
+    impl CssPolicy for DropEverySelector {
+        fn rule(&self, _rule: &mut CssRule<'_>, context: RuleContext) -> NodeDecision {
+            if context.kind == RuleKind::Style {
+                NodeDecision::Keep
+            } else {
+                NodeDecision::Drop
+            }
+        }
+
+        fn selector(
+            &self,
+            _selectors: &mut css_sanitizer::lightningcss::selector::SelectorList<'_>,
+            _context: SelectorContext,
+        ) -> NodeDecision {
+            NodeDecision::Drop
+        }
+
+        fn property(
+            &self,
+            _property: &mut Property<'_>,
+            _context: PropertyContext<'_>,
+        ) -> NodeDecision {
+            NodeDecision::Keep
+        }
+
+        fn resource(
+            &self,
+            _resource: ResourceRef<'_>,
+            _context: &ValueContext<'_>,
+        ) -> ValueDecision {
+            ValueDecision::Allow
+        }
+    }
+
+    let css = stylesheet_css(
+        "[data-secret] { background-image: url('https://example.test/a.png') }",
+        &DropEverySelector,
+    );
+    assert!(css.is_empty());
 }
