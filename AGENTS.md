@@ -1,16 +1,35 @@
 # Agent Instructions
-- Do not modify files unless the user explicitly approves the specific change.
-- Before proposing edits, explain the problem, affected files, and at least one implementation option.
-- If a fix is needed, wait for user confirmation before applying patches.
-- Analysis, tests, and read-only commands are allowed unless the user says otherwise.
-- Do not touch, revert, format, or otherwise modify unrelated files or user changes outside the current task scope.
-- If a file has changes you did not intentionally make, do not revert or "clean up" those changes; ask the user before touching it.
+
+- Work autonomously within the user's requested scope. Ask only when requirements are genuinely ambiguous or a decision would materially change behavior, architecture, or scope.
+- Inspect and follow the repository's existing architecture, conventions, code style, naming, and file structure before making changes.
+- Keep code organized by responsibility. Functions, types, modules, and files should have clear roles and live where they naturally belong.
+- Use explicit, descriptive names for variables, functions, types, files, and modules. Avoid vague names and unnecessary abbreviations.
+- Prefer clear, direct implementations over unnecessary abstractions, compatibility layers, configuration, or cleverness.
+- Fix root causes rather than adding temporary workarounds.
+- Do not modify, revert, reformat, or clean up unrelated user changes.
+- Validate changes with the relevant tests, type checks, linting, formatting, or builds. Never claim validation that was not performed.
+- Commit completed changes in coherent logical units. Keep unrelated changes separate and write concise English commit messages.
+- Do not rewrite existing commits or use destructive Git operations unless explicitly requested.
+
+## Code Quality
+
+- Understand the repository's existing architecture and conventions before making changes. Follow them where appropriate, but do not assume the existing design is correct.
+- If you identify a structural problem or a materially better design, explain the options and tradeoffs and ask the user which direction to take before implementing the affected changes.
+- Treat readability, maintainability, and clear structure as completion requirements. Do not settle for code that merely works.
 
 ## Memory Workflow
-- When a user-approved milestone is completed, especially after instructions such as "bump the version", "write the changelog", or "this scope is done", update the `memory/` folder before the final response.
-- Use `memory/YYYY-MM-DD-<version-or-scope>.md` for milestone snapshots. Keep `memory/README.md` as the workflow index and `memory/TEMPLATE.md` as the required structure.
-- A milestone memory document must include: objective, user-approved scope/interactions, implementation status, major changed files/modules, API/service/repository/permission behavior, worker/background-job behavior, validation commands/results, remaining gaps, and follow-up entry points.
-- Record facts that help the next agent resume work without rereading the whole conversation. Do not store secrets, tokens, private credentials, or irrelevant chat history.
-- If a milestone changes server/worker integration, permissions, migrations, or version/changelog state, explicitly call that out in the memory document.
+
+Update `memory/` before the final response when a completed milestone materially changes architecture, public APIs, schemas, configuration, tooling, deployment, major features, or assumptions a future agent needs to know.
+
+### Naming
+
+`memory/YYYY-MM-DD-<version-or-scope>.md`
+
+Keep `memory/README.md` as the index and use `memory/TEMPLATE.md` as the required structure when present.
+
+### Content Rules
+
+- Record durable facts needed to resume work: what changed, key decisions, constraints, and validation status.
 - If validation was skipped or failed, record exactly what was not verified and why.
-- Do not edit unrelated memory entries while documenting a new milestone. If an older entry is wrong, create a short correction note or ask the user before rewriting it.
+- Do not store secrets, credentials, or irrelevant conversation history.
+- Do not edit unrelated memory entries. Add a correction or superseding entry when an older entry is no longer accurate.
