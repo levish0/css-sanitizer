@@ -1,12 +1,20 @@
 mod common;
 
 use common::{DropImportant, NoGlobalSelectors, declaration_css, stylesheet_css};
+use css_sanitizer::lightningcss::declaration::DeclarationBlock;
+use css_sanitizer::lightningcss::properties::{
+    Property,
+    custom::{Token, TokenList, TokenOrValue},
+};
 use css_sanitizer::lightningcss::rules::CssRule;
 use css_sanitizer::lightningcss::rules::font_feature_values::{
     FontFeatureSubrule, FontFeatureSubruleType,
 };
 use css_sanitizer::lightningcss::stylesheet::{ParserOptions, StyleSheet};
-use css_sanitizer::{CssPolicy, NodeDecision, RuleContext, RuleKind, sanitize_stylesheet_ast};
+use css_sanitizer::{
+    CssPolicy, NodeDecision, PropertyContext, ResourceUse, RuleContext, RuleKind, StrictPolicy,
+    ValueContext, ValueDecision, sanitize_declaration_block_ast, sanitize_stylesheet_ast,
+};
 
 struct DropSwashSubrules;
 
@@ -81,4 +89,90 @@ fn custom_policy_can_filter_font_feature_subrules() {
         &DropSwashSubrules,
     );
     assert!(empty.is_empty());
+}
+
+#[test]
+fn constructed_tokens_cannot_hide_resources_until_serialization() {
+    let mut block =
+        DeclarationBlock::parse_string("background-image: unknown", ParserOptions::default())
+            .unwrap();
+    let Property::Unparsed(property) = &mut block.declarations[0] else {
+        panic!()
+    };
+    property.value = TokenList(vec![
+        TokenOrValue::Token(Token::Ident("url".into())),
+        TokenOrValue::Token(Token::ParenthesisBlock),
+        TokenOrValue::Token(Token::String("https://example.test/image.png".into())),
+        TokenOrValue::Token(Token::CloseParenthesis),
+    ]);
+
+    let mut explicitly_allowed = block.clone();
+    let policy = StrictPolicy::new().allow_properties(&["background-image"]);
+    let report = sanitize_declaration_block_ast(&mut block, &policy);
+    assert!(block.is_empty());
+    assert_eq!(report.rejected_values, 1);
+
+    sanitize_declaration_block_ast(
+        &mut explicitly_allowed,
+        &policy.dangerously_allow_unrestricted_resources(&[ResourceUse::Image]),
+    );
+    assert!(!explicitly_allowed.is_empty());
+}
+
+#[test]
+fn raw_function_tokens_cannot_bypass_the_resource_hook_of_a_custom_policy() {
+    struct AllowPropertiesAndTokens;
+    impl CssPolicy for AllowPropertiesAndTokens {
+        fn property(&self, _: &mut Property<'_>, _: PropertyContext<'_>) -> NodeDecision {
+            NodeDecision::Keep
+        }
+        fn token(&self, _: &TokenOrValue<'_>, _: &ValueContext<'_>) -> ValueDecision {
+            ValueDecision::Allow
+        }
+    }
+
+    let mut block =
+        DeclarationBlock::parse_string("background-image: unknown", ParserOptions::default())
+            .unwrap();
+    let Property::Unparsed(property) = &mut block.declarations[0] else {
+        panic!()
+    };
+    property.value = TokenList(vec![
+        TokenOrValue::Token(Token::Function("url".into())),
+        TokenOrValue::Token(Token::String("https://example.test/image.png".into())),
+        TokenOrValue::Token(Token::CloseParenthesis),
+    ]);
+    let report = sanitize_declaration_block_ast(&mut block, &AllowPropertiesAndTokens);
+    assert!(block.is_empty());
+    assert_eq!(report.rejected_values, 1);
+}
+
+#[test]
+fn constructed_tokens_cannot_introduce_a_declaration_or_important_flag() {
+    for suffix in [
+        vec![
+            Token::Semicolon,
+            Token::Ident("position".into()),
+            Token::Colon,
+            Token::Ident("fixed".into()),
+        ],
+        vec![Token::Delim('!'), Token::Ident("important".into())],
+    ] {
+        let mut block =
+            DeclarationBlock::parse_string("color: unknown", ParserOptions::default()).unwrap();
+        let Property::Unparsed(property) = &mut block.declarations[0] else {
+            panic!()
+        };
+        property.value = TokenList(
+            std::iter::once(Token::Ident("red".into()))
+                .chain(suffix)
+                .map(TokenOrValue::Token)
+                .collect(),
+        );
+        sanitize_declaration_block_ast(
+            &mut block,
+            &StrictPolicy::new().allow_properties(&["color"]),
+        );
+        assert!(block.is_empty());
+    }
 }

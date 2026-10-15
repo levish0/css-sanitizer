@@ -15,8 +15,7 @@ fn sanitize_benchmarks(criterion: &mut Criterion) {
             "padding",
             "margin",
         ])
-        .allow_resources(&[ResourceUse::Image])
-        .allow_variables();
+        .dangerously_allow_unrestricted_resources(&[ResourceUse::Image]);
 
     criterion.bench_function("sanitize declaration list", |bencher| {
         bencher.iter(|| {

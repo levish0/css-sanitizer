@@ -6,17 +6,18 @@ The crate deliberately stays close to the upstream AST. Custom policies receive
 `lightningcss::rules::CssRule`, `Property`, `SelectorList`, and descriptor types directly.
 The crate adds the security semantics that a parser does not provide: deny-by-default
 decisions, parent/value context, use-specific resource checks, traversal invariants,
-input/output limits, diagnostics, and HTML-style-element-safe output.
+input/output limits, diagnostics, and explicit HTML output encoding.
 
 ## Install
 
 ```toml
 [dependencies]
-css-sanitizer = "0.5.0"
+css-sanitizer = "0.6.0"
 ```
 
-Version 0.5 is a breaking API redesign. It does not include compatibility aliases for the
-0.4 policy or string-cleaning APIs.
+Version 0.6 is a breaking API update. Resource permissions require a validator, variable
+permissions name their allowed properties, and budgets live in `SanitizeLimits`.
+There are no compatibility aliases; see [the changelog](CHANGELOG.md) for migration details.
 
 ## Declaration-list quick start
 
@@ -36,6 +37,11 @@ assert_eq!(output.report.dropped_declarations, 1);
 String entry points return `Result<SanitizeOutput, SanitizeError>`. `SanitizeOutput`
 contains a `SanitizedCss` value and a `SanitizeReport`; parse, serialization, and budget
 failures are no longer collapsed into an empty string.
+
+Recovery-mode parser warnings are also reported: `parse_warning_count` includes every
+upstream warning, while `parse_warnings` contains the first 32 messages with one-based
+line/column locations. Dropped-node counts describe policy decisions, not parser recovery.
+Use `SanitizeOptions::with_parse_mode(ParseMode::Strict)` when recovery is inappropriate.
 
 ## Stylesheet quick start
 
@@ -161,9 +167,9 @@ and `!important` state.
 
 `StrictPolicy` exposes separate capabilities:
 
-- `allow_resources(&[ResourceUse::...])`
-- `allow_variables()`
-- `allow_environment_variables()`
+- `allow_resources(&[ResourceUse::...], validator)` for explicit URL/context validation
+- `allow_variables(&["color", "width"])` for property-specific variable trust
+- `allow_environment_variables(&["padding-top"])` for property-specific environment values
 - `allow_functions(&["..."])`
 - typed font-face, font-palette, and view-transition descriptor allowlists
 - `allow_local_fonts()`
@@ -178,10 +184,52 @@ Resource strings are parser-decoded but unresolved. They may be relative and
 resolve literals against its own trusted base URL, and a fetch layer must re-check redirect
 destinations.
 
+`allow_resources()` requires a validator for the specified uses. Validators for other uses
+are preserved; calling it again for the same use replaces that use's validator. For example,
+using the `url` crate
+(`url = "2.5"` in the application's dependencies):
+
+```rust
+use css_sanitizer::{ResourceUse, StrictPolicy, ValueDecision, sanitize_declaration_list};
+use url::Url;
+
+let trusted_origin = Url::parse("https://cdn.example.test")?.origin();
+let policy = StrictPolicy::new()
+    .allow_properties(&["color", "background-image"])
+    .allow_variables(&["color"])
+    .allow_resources(&[ResourceUse::Image], move |resource, _context| {
+        let Some(url) = resource.value.and_then(|value| Url::parse(value).ok()) else {
+            return ValueDecision::Deny;
+        };
+        if url.origin() == trusted_origin && url.username().is_empty() && url.password().is_none() {
+            ValueDecision::Allow
+        } else {
+            ValueDecision::Deny
+        }
+    });
+
+let output = sanitize_declaration_list(
+    "color: var(--text-color); background-image: url('https://cdn.example.test/card.png')",
+    &policy,
+)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+This example permits only absolute URLs with the configured HTTPS origin. Relative and
+dynamic references are rejected. If a validator resolves relative URLs, its trusted base
+must match the base used by the consuming document; validation does not rewrite the URL.
+Validators never enable other resource uses or `@import`, and cannot inspect redirects.
+`dangerously_allow_unrestricted_resources()` explicitly trusts every URL scheme, origin,
+and dynamic reference for the specified uses. It is intended for trusted transformation
+workflows, not for untrusted CSS.
+
 Dynamic substitution cannot be resolved across cascade boundaries. Allowing `var()`,
 `env()`, or an externally defined custom function trusts values supplied outside the
 sanitized fragment. Use `ValueContext` to deny dynamic substitution in resource-capable
 properties when that trust is not appropriate.
+The variable and environment-variable builders only enable substitution in the named
+properties. They do not enable the properties themselves, descriptor substitutions, or
+resources in fallbacks. They do not resolve or validate values supplied by the host cascade.
 
 ## Rules and descriptors
 
@@ -206,10 +254,16 @@ and references.
 A general resource permission never enables `@import`.
 
 ```rust
-use css_sanitizer::{ResourceUse, StrictPolicy};
+use css_sanitizer::{ResourceUse, StrictPolicy, ValueDecision};
 
 let images_only = StrictPolicy::new()
-    .allow_resources(&[ResourceUse::Image]);
+    .allow_resources(&[ResourceUse::Image], |resource, _| {
+        if resource.value == Some("https://cdn.example.test/logo.png") {
+            ValueDecision::Allow
+        } else {
+            ValueDecision::Deny
+        }
+    });
 
 let trusted_passthrough = StrictPolicy::new()
     .dangerously_allow_passthrough_imports();
@@ -222,30 +276,33 @@ resolution.
 
 ## Parse and traversal limits
 
-String entry points enforce these defaults before calling lightningcss:
+All budgets are configured together. String input budgets are enforced before calling
+lightningcss, the rule budget during AST traversal, and the output budget after serialization:
 
 - input: 1 MiB
-- delimiter nesting: 128
+- delimiter nesting: 32
 - output: 1 MiB
-- sanitizer AST traversal: 128
+- nested rule-list depth: 128 (root rules have depth 0)
 
 ```rust
-use css_sanitizer::{ParseLimits, SanitizeOptions};
+use css_sanitizer::{ParseMode, SanitizeLimits, SanitizeOptions};
 
 let options = SanitizeOptions::default()
-    .with_parse_limits(
-        ParseLimits::default()
+    .with_limits(
+        SanitizeLimits::default()
             .with_max_input_bytes(64 * 1024)
-            .with_max_nesting_depth(64)
-            .with_max_output_bytes(64 * 1024),
+            .with_max_nesting_depth(16)
+            .with_max_output_bytes(64 * 1024)
+            .with_max_rule_depth(64),
     )
-    .with_max_traversal_depth(64)
-    .with_strict_parsing();
+    .with_parse_mode(ParseMode::Strict);
 ```
 
-The pre-parser scanner ignores delimiters in CSS strings/comments and escaped delimiters.
-It rejects known recursive selector, function, and rule shapes before the upstream parser
-can overflow. This is an input guard, not a formal proof that an upstream parser has no
+The pre-parser guard uses the same CSS tokenizer as lightningcss, walks tokens iteratively,
+and tracks matching delimiter kinds. Bad strings, bad URLs, CSS escapes, and mismatched
+closing delimiters cannot hide nested blocks. The default depth of 32 is exercised with
+known recursive shapes on a 1 MiB stack; increasing it requires validating the target
+runtime's stack budget. This is an input guard, not a formal proof that an upstream parser has no
 other resource-exhaustion path. lightningcss
 [issue #1297](https://github.com/parcel-bundler/lightningcss/issues/1297) remains open for
 alpha.72; high-availability systems should still consider process isolation for hostile
@@ -253,7 +310,7 @@ inputs.
 
 Parser feature flags such as `ParserFlags::CUSTOM_MEDIA` can be enabled with
 `SanitizeOptions::with_parser_flags()`. The default string API uses lightningcss error
-recovery; `with_strict_parsing()` returns the first parse error instead.
+recovery (`ParseMode::Recover`); `ParseMode::Strict` returns the first parse error instead.
 
 `dangerously_disable_value_guard()` exists for trusted transformation workflows. It
 disables the core resource/value invariant and should not be used for untrusted CSS.
@@ -275,6 +332,21 @@ let html_style_text = output.css.to_style_element_text();
 
 The method removes case-insensitive literal HTML `</style` end-tag sequences while
 preserving valid CSS. Prefer DOM text APIs such as `style.textContent` when available.
+
+For declaration-list output interpolated into a **quoted** HTML `style` attribute, use
+`output.css.to_style_attribute_value()`. It encodes quotes, ampersands, and angle brackets:
+
+```rust
+# use css_sanitizer::{StrictPolicy, sanitize_declaration_list};
+let output = sanitize_declaration_list("color: red", &StrictPolicy::new().allow_properties(&["color"]))?;
+let html = format!(r#"<span style="{}">Text</span>"#, output.css.to_style_attribute_value());
+# Ok::<(), css_sanitizer::SanitizeError>(())
+```
+
+`SanitizedCss` does not implement `Display`: callers must choose the output context
+explicitly. `as_str()` and `into_string()` return CSS without HTML encoding. Use these raw
+CSS methods for `style.cssText`, `setAttribute("style", value)`, and other DOM APIs; do not
+pass HTML-encoded output to those APIs or to an auto-escaping template a second time.
 
 ## AST entry points
 
@@ -303,12 +375,27 @@ assert_eq!(report.dropped_declarations, 1);
 
 The crate re-exports lightningcss as `css_sanitizer::lightningcss`.
 
+Retained raw token lists are checked against their serialized CSS syntax so separate AST
+tokens cannot combine into an unchecked resource function, declaration, or `!important`.
+These checks use `SanitizeLimits` input and nesting budgets for the serialized value and fail closed. AST inputs still
+need to obey upstream structural invariants, and the caller owns the original parse and
+serialization budgets. Transformations made after sanitization require sanitization again.
+
 ## Public entry points
 
 - `sanitize_declaration_list()` / `sanitize_declaration_list_with_options()`
 - `sanitize_stylesheet()` / `sanitize_stylesheet_with_options()`
 - `sanitize_declaration_block_ast()` / `sanitize_declaration_block_ast_with_options()`
 - `sanitize_stylesheet_ast()` / `sanitize_stylesheet_ast_with_options()`
+
+## Internal responsibilities
+
+- `sanitize`: public string/AST entry points, parsing, diagnostics, and serialization.
+- `ast_sanitizer`: structural policy application, recursive rule traversal, pruning, and counters.
+- `value_guard`: resource, dynamic-value, and serialized-token validation.
+- `limits`: iterative lexical input checks and serialized-output size checks.
+- `policy`: the typed extension contract; `strict_policy`: the built-in allowlist implementation.
+- `options`: parser mode and budgets; `output`: results, reports, errors, and HTML encoding.
 
 ## Development
 

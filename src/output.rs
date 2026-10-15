@@ -1,14 +1,49 @@
 use std::fmt;
 
+/// A recoverable parser warning. Line and column numbers are one-based.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ParseWarning {
+    pub message: String,
+    pub line: Option<u32>,
+    pub column: Option<u32>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SanitizeReport {
     pub dropped_rules: usize,
     pub dropped_selector_lists: usize,
     pub dropped_declarations: usize,
     pub dropped_descriptors: usize,
     pub rejected_values: usize,
+    /// Total warnings emitted by the parser, including omitted details.
+    /// AST entry points do not parse input and leave this at zero.
+    pub parse_warning_count: usize,
+    /// The first 32 parser warnings, in source order.
+    pub parse_warnings: Vec<ParseWarning>,
 }
 
+impl SanitizeReport {
+    pub(crate) fn record_parse_warnings(
+        &mut self,
+        warnings: &[lightningcss::error::Error<lightningcss::error::ParserError<'_>>],
+    ) {
+        self.parse_warning_count = warnings.len();
+        self.parse_warnings = warnings
+            .iter()
+            .take(32)
+            .map(|warning| ParseWarning {
+                message: warning.kind.to_string(),
+                line: warning.loc.as_ref().map(|location| location.line + 1),
+                column: warning.loc.as_ref().map(|location| location.column),
+            })
+            .collect();
+    }
+}
+
+/// CSS output that requires an explicit choice of raw CSS or HTML encoding.
+/// It intentionally does not implement `Display`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SanitizedCss(String);
 
@@ -17,10 +52,12 @@ impl SanitizedCss {
         Self(css)
     }
 
+    /// Returns raw CSS for CSSOM, text-node APIs, or a CSS response body.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
+    /// Consumes the wrapper and returns raw CSS, without HTML encoding.
     pub fn into_string(self) -> String {
         self.0
     }
@@ -33,17 +70,29 @@ impl SanitizedCss {
     pub fn to_style_element_text(&self) -> String {
         escape_style_close_tag(&self.0)
     }
+
+    /// Encodes CSS for a quoted HTML `style="..."` or `style='...'` attribute.
+    /// Use only with declaration-list output. For DOM APIs such as
+    /// `setAttribute("style", value)` or `style.cssText`, use [`Self::as_str`].
+    pub fn to_style_attribute_value(&self) -> String {
+        let mut output = String::with_capacity(self.0.len());
+        for character in self.0.chars() {
+            match character {
+                '&' => output.push_str("&amp;"),
+                '"' => output.push_str("&quot;"),
+                '\'' => output.push_str("&#39;"),
+                '<' => output.push_str("&lt;"),
+                '>' => output.push_str("&gt;"),
+                other => output.push(other),
+            }
+        }
+        output
+    }
 }
 
 impl AsRef<str> for SanitizedCss {
     fn as_ref(&self) -> &str {
         self.as_str()
-    }
-}
-
-impl fmt::Display for SanitizedCss {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
     }
 }
 

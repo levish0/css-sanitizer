@@ -5,6 +5,34 @@ All notable changes to css-sanitizer will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-10-15
+
+### Changed (breaking)
+
+- `StrictPolicy::allow_resources(uses, validator)` now requires a resource/context validator. Permissions and validators are independent per resource use. Explicitly trusting every URL scheme, origin, and dynamic reference requires `dangerously_allow_unrestricted_resources(uses)`.
+- `allow_variables(properties)` and `allow_environment_variables(properties)` now require explicit property allowlists. They do not enable the properties themselves or substitutions in descriptors.
+- Replaced `ParseLimits` with `SanitizeLimits`, combining input, lexical nesting, output, and rule-depth budgets. Use `SanitizeOptions::with_limits()` and `SanitizeLimits::with_max_rule_depth()` instead of `with_parse_limits()` and `with_max_traversal_depth()`.
+- Replaced the `error_recovery` boolean and `with_strict_parsing()` with `ParseMode::{Recover, Strict}` and `SanitizeOptions::with_parse_mode()`.
+- Lowered the default lexical nesting budget from 128 to 32 after reproducing stack exhaustion with valid nested rules on a 1 MiB Windows debug stack. Callers increasing this limit must validate their runtime's stack budget.
+- Removed `Display` from `SanitizedCss` so callers explicitly choose raw CSS or HTML-context encoding.
+- `SanitizeReport` is now non-exhaustive. Construct it with `Default` rather than a struct literal.
+
+### Fixed
+
+- Replaced the handwritten pre-parser scanner with an iterative CSS token walk using matching delimiter kinds. Invalid strings, bad URLs, and mismatched closing delimiters no longer bypass the nesting limit and reach unbounded upstream recursion.
+- Validate the serialized syntax of raw AST token lists before value-policy checks. Constructed tokens cannot combine into unchecked resource functions, additional declarations, or `!important` flags.
+
+### Added
+
+- `SanitizeReport::parse_warning_count` and `parse_warnings` expose parser recovery, with at most 32 detailed warnings and one-based source locations.
+- `SanitizedCss::to_style_attribute_value()` encodes declaration-list output for quoted HTML style attributes.
+- An executable resource-validation example using parsed HTTPS origins, plus regression coverage for per-use validators, scoped substitutions, parser diagnostics, HTML encoding, malformed nesting, and constructed AST tokens.
+
+### Internal
+
+- Separated public API orchestration, AST sanitization, lexical budgets, and value validation into modules with explicit responsibilities. Renamed the built-in policy module to `strict_policy` and clarified internal types and variable names.
+- Documented URL-validator boundaries, cross-cascade substitution trust, output contexts, and the structural invariants required by the AST API.
+
 ## [0.5.0] - 2026-08-30
 
 ### Changed (breaking)

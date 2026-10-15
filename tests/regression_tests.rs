@@ -9,10 +9,9 @@ use css_sanitizer::lightningcss::properties::Property;
 use css_sanitizer::lightningcss::properties::custom::TokenOrValue;
 use css_sanitizer::lightningcss::rules::CssRule;
 use css_sanitizer::{
-    CssPolicy, NodeDecision, ParseLimits, PropertyContext, PropertyLocation, ResourceRef,
-    RuleContext, RuleKind, SanitizeError, SanitizeOptions, SelectorContext, ValueContext,
-    ValueDecision, sanitize_declaration_list_with_options, sanitize_stylesheet,
-    sanitize_stylesheet_with_options,
+    CssPolicy, NodeDecision, PropertyContext, PropertyLocation, ResourceRef, RuleContext, RuleKind,
+    SanitizeError, SanitizeLimits, SanitizeOptions, SelectorContext, ValueContext, ValueDecision,
+    sanitize_declaration_list_with_options, sanitize_stylesheet, sanitize_stylesheet_with_options,
 };
 
 #[test]
@@ -46,7 +45,7 @@ fn traversal_depth_cap_fails_closed_after_parsing() {
     let output = sanitize_stylesheet_with_options(
         &input,
         &policy,
-        SanitizeOptions::default().with_max_traversal_depth(3),
+        SanitizeOptions::default().with_limits(SanitizeLimits::default().with_max_rule_depth(3)),
     )
     .expect("stylesheet should sanitize");
     assert!(!output.css.as_str().contains("color"));
@@ -62,7 +61,7 @@ fn parser_nesting_limit_rejects_known_stack_overflow_shape_before_parse() {
     );
     let error = sanitize_stylesheet(&input, &style_policy(&["color"]))
         .expect_err("pathological selector must be rejected");
-    assert_eq!(error, SanitizeError::NestingTooDeep { max: 128 });
+    assert_eq!(error, SanitizeError::NestingTooDeep { max: 32 });
 }
 
 #[test]
@@ -78,8 +77,7 @@ fn input_and_output_byte_limits_return_typed_errors() {
     let input_error = sanitize_declaration_list_with_options(
         "color: red",
         &css_sanitizer::StrictPolicy::new().allow_properties(&["color"]),
-        SanitizeOptions::default()
-            .with_parse_limits(ParseLimits::default().with_max_input_bytes(2)),
+        SanitizeOptions::default().with_limits(SanitizeLimits::default().with_max_input_bytes(2)),
     )
     .expect_err("input limit must be enforced");
     assert_eq!(
@@ -90,8 +88,7 @@ fn input_and_output_byte_limits_return_typed_errors() {
     let output_error = sanitize_declaration_list_with_options(
         "color: red",
         &css_sanitizer::StrictPolicy::new().allow_properties(&["color"]),
-        SanitizeOptions::default()
-            .with_parse_limits(ParseLimits::default().with_max_output_bytes(2)),
+        SanitizeOptions::default().with_limits(SanitizeLimits::default().with_max_output_bytes(2)),
     )
     .expect_err("output limit must be enforced");
     assert!(matches!(
@@ -105,7 +102,7 @@ fn strict_parsing_surfaces_invalid_css_instead_of_recovering() {
     let error = sanitize_stylesheet_with_options(
         ".card { color: red; broken }",
         &style_policy(&["color"]),
-        SanitizeOptions::default().with_strict_parsing(),
+        SanitizeOptions::default().with_parse_mode(css_sanitizer::ParseMode::Strict),
     )
     .expect_err("strict parsing should reject the malformed declaration");
     assert!(matches!(error, SanitizeError::Parse(_)));

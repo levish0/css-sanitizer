@@ -37,7 +37,7 @@ impl CssPolicy for ColorOnly {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let declarations =
         sanitize_declaration_list("color: rebeccapurple; position: fixed", &ColorOnly)?;
-    println!("{}", declarations.css);
+    println!("{}", declarations.css.as_str());
     println!(
         "dropped declarations: {}",
         declarations.report.dropped_declarations
@@ -47,7 +47,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ".card { color: rebeccapurple; position: fixed }",
         &ColorOnly,
     )?;
-    println!("{}", stylesheet.css);
+    println!("{}", stylesheet.css.as_str());
     println!(
         "HTML style text: {}",
         stylesheet.css.to_style_element_text()

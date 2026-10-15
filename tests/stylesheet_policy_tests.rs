@@ -36,7 +36,7 @@ fn style_rules_filter_properties_and_prune_empty_rules() {
 fn import_is_denied_even_when_resources_are_allowed() {
     let css = stylesheet_css(
         "@import url('https://example.test/theme.css'); .card { color: red }",
-        &style_policy(&["color"]).allow_resources(&[ResourceUse::Image]),
+        &style_policy(&["color"]).dangerously_allow_unrestricted_resources(&[ResourceUse::Image]),
     );
     assert!(!css.contains("@import"));
     assert!(css.contains("color"));
@@ -92,7 +92,7 @@ fn font_face_requires_rule_descriptor_and_resource_capabilities() {
             FontFaceDescriptorKind::FontFamily,
             FontFaceDescriptorKind::Source,
         ])
-        .allow_resources(&[ResourceUse::FontSource]);
+        .dangerously_allow_unrestricted_resources(&[ResourceUse::FontSource]);
 
     let css = stylesheet_css(
         "@font-face { font-family: Demo; src: local('Installed Font'), url('https://example.test/demo.woff2') }",

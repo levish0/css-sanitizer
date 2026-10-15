@@ -63,7 +63,7 @@ fn image_resources_are_a_use_specific_capability() {
         "background-image: url('https://example.test/image.png')",
         &StrictPolicy::new()
             .allow_properties(&["background-image"])
-            .allow_resources(&[ResourceUse::Image]),
+            .dangerously_allow_unrestricted_resources(&[ResourceUse::Image]),
     );
     assert!(allowed.contains("example.test"));
 }
@@ -74,7 +74,7 @@ fn variables_do_not_implicitly_allow_resources_in_fallbacks() {
         "background-image: var(--image, url('https://example.test/fallback.png'))",
         &StrictPolicy::new()
             .allow_properties(&["background-image"])
-            .allow_variables(),
+            .allow_variables(&["background-image"]),
     );
     assert!(denied.is_empty());
 
@@ -82,8 +82,8 @@ fn variables_do_not_implicitly_allow_resources_in_fallbacks() {
         "background-image: var(--image, url('https://example.test/fallback.png'))",
         &StrictPolicy::new()
             .allow_properties(&["background-image"])
-            .allow_variables()
-            .allow_resources(&[ResourceUse::Image]),
+            .allow_variables(&["background-image"])
+            .dangerously_allow_unrestricted_resources(&[ResourceUse::Image]),
     );
     assert!(allowed.contains("var("));
     assert!(allowed.contains("url("));
@@ -126,4 +126,56 @@ fn ast_entry_point_updates_the_existing_tree_and_returns_a_report() {
         .expect("declaration block should serialize");
     assert_eq!(css, "color: red");
     assert_eq!(report.dropped_declarations, 1);
+}
+
+#[test]
+fn scoped_variables_do_not_enable_resources_or_other_properties() {
+    let policy = StrictPolicy::new()
+        .allow_properties(&["color", "background-image", "--Exact", "--exact"])
+        .allow_variables(&["COLOR", "--Exact"]);
+    for input in [
+        "color: var(--tone)",
+        "color: VAR(--tone)",
+        "--Exact: var(--tone)",
+    ] {
+        assert!(!declaration(input, &policy).css.is_empty(), "{input}");
+    }
+    for input in [
+        "background-image: var(--external)",
+        "color: var(--tone, url('image.png'))",
+        "color: env(external)",
+        "--exact: var(--tone)",
+    ] {
+        assert!(declaration(input, &policy).css.is_empty(), "{input}");
+    }
+}
+
+#[test]
+fn scoped_environment_variables_do_not_enable_other_properties_or_fallback_resources() {
+    let policy = StrictPolicy::new()
+        .allow_properties(&["width", "background-image", "--Exact", "--exact"])
+        .allow_environment_variables(&["WIDTH", "--Exact"]);
+    for input in [
+        "width: env(safe-area-inset-left)",
+        "width: ENV(safe-area-inset-left)",
+        "--Exact: env(external)",
+    ] {
+        assert!(!declaration_css(input, &policy).is_empty(), "{input}");
+    }
+    for input in [
+        "background-image: env(external)",
+        "--exact: env(external)",
+        "width: env(external, url('image.png'))",
+        "width: var(--external)",
+    ] {
+        assert!(declaration_css(input, &policy).is_empty(), "{input}");
+    }
+}
+
+#[test]
+fn substitution_permissions_do_not_allow_the_properties_themselves() {
+    let policy = StrictPolicy::new()
+        .allow_variables(&["color"])
+        .allow_environment_variables(&["width"]);
+    assert!(declaration_css("color: var(--tone); width: env(external)", &policy).is_empty());
 }

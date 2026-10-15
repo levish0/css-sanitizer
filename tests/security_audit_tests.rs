@@ -46,15 +46,15 @@ fn dynamic_resource_wrappers_require_dynamic_and_resource_permissions() {
 
     let resource_only = StrictPolicy::new()
         .allow_properties(&["background-image"])
-        .allow_resources(&[ResourceUse::Image]);
+        .dangerously_allow_unrestricted_resources(&[ResourceUse::Image]);
     assert!(declaration_css(input, &resource_only).is_empty());
 
     let dynamic_only = StrictPolicy::new()
         .allow_properties(&["background-image"])
-        .allow_variables();
+        .allow_variables(&["background-image"]);
     assert!(declaration_css(input, &dynamic_only).is_empty());
 
-    let both = dynamic_only.allow_resources(&[ResourceUse::Image]);
+    let both = dynamic_only.dangerously_allow_unrestricted_resources(&[ResourceUse::Image]);
     assert!(declaration_css(input, &both).contains("var("));
 }
 
@@ -201,7 +201,7 @@ fn font_source_context_is_distinct_from_image_context() {
 fn resource_use_permissions_do_not_bleed_between_css_features() {
     let policy = StrictPolicy::new()
         .allow_properties(&["background-image", "cursor"])
-        .allow_resources(&[ResourceUse::Image]);
+        .dangerously_allow_unrestricted_resources(&[ResourceUse::Image]);
     let css = declaration_css(
         "background-image: url('image.png'); cursor: url('cursor.cur'), auto",
         &policy,
@@ -218,7 +218,7 @@ fn local_font_access_is_separate_from_font_urls() {
             FontFaceDescriptorKind::FontFamily,
             FontFaceDescriptorKind::Source,
         ])
-        .allow_resources(&[ResourceUse::FontSource]);
+        .dangerously_allow_unrestricted_resources(&[ResourceUse::FontSource]);
 
     let denied = stylesheet_css(
         "@font-face { font-family: Demo; src: local('Installed Font') }",

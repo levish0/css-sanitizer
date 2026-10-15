@@ -1,6 +1,8 @@
 //! Built-in safe allowlist policy.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt;
+use std::sync::Arc;
 
 use lightningcss::printer::PrinterOptions;
 use lightningcss::properties::Property;
@@ -21,6 +23,19 @@ use crate::policy::{
     SelectorContext, ValueContext, ValueDecision, ViewTransitionDescriptorKind,
 };
 
+type ResourceValidator = dyn Fn(ResourceRef<'_>, &ValueContext<'_>) -> ValueDecision + Send + Sync;
+
+#[derive(Clone)]
+struct ResourcePermission {
+    validator: Arc<ResourceValidator>,
+}
+
+impl fmt::Debug for ResourcePermission {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ResourcePermission(..)")
+    }
+}
+
 /// A safe-by-default convenience preset.
 ///
 /// Complex policies should implement [`CssPolicy`] directly. This preset never
@@ -32,15 +47,15 @@ pub struct StrictPolicy {
     allowed_properties: HashSet<String>,
     allowed_rules: HashSet<RuleKind>,
     allowed_values: HashMap<String, HashSet<String>>,
-    allowed_resources: HashSet<ResourceUse>,
+    resource_permissions: HashMap<ResourceUse, ResourcePermission>,
     allowed_font_face_descriptors: HashSet<FontFaceDescriptorKind>,
     allowed_font_palette_values_descriptors: HashSet<FontPaletteValuesDescriptorKind>,
     allowed_view_transition_descriptors: HashSet<ViewTransitionDescriptorKind>,
     allowed_functions: HashSet<String>,
     allow_important: bool,
     allow_unscoped_selectors: bool,
-    allow_variables: bool,
-    allow_environment_variables: bool,
+    properties_allowing_variables: HashSet<String>,
+    properties_allowing_environment_variables: HashSet<String>,
     allow_local_fonts: bool,
     allow_page_margin_rules: bool,
     allow_font_feature_values_subrules: bool,
@@ -57,15 +72,15 @@ impl Default for StrictPolicy {
                 RuleKind::NestedDeclarations,
             ]),
             allowed_values: HashMap::new(),
-            allowed_resources: HashSet::new(),
+            resource_permissions: HashMap::new(),
             allowed_font_face_descriptors: HashSet::new(),
             allowed_font_palette_values_descriptors: HashSet::new(),
             allowed_view_transition_descriptors: HashSet::new(),
             allowed_functions: HashSet::new(),
             allow_important: false,
             allow_unscoped_selectors: false,
-            allow_variables: false,
-            allow_environment_variables: false,
+            properties_allowing_variables: HashSet::new(),
+            properties_allowing_environment_variables: HashSet::new(),
             allow_local_fonts: false,
             allow_page_margin_rules: false,
             allow_font_feature_values_subrules: false,
@@ -110,9 +125,32 @@ impl StrictPolicy {
         self
     }
 
-    pub fn allow_resources(mut self, uses: &[ResourceUse]) -> Self {
-        self.allowed_resources.extend(uses.iter().copied());
+    /// Allows the named resource uses only when the validator also allows them.
+    /// URLs are decoded but unresolved; dynamic references have no literal value.
+    /// Use a URL parser to check schemes and origins, and reject dynamic
+    /// references when they cannot be validated. Each call replaces validators
+    /// for the specified uses, leaving other resource permissions unchanged.
+    ///
+    /// This does not inspect values supplied by an external CSS variable or
+    /// custom function, and never enables `@import`.
+    pub fn allow_resources<F>(mut self, uses: &[ResourceUse], validator: F) -> Self
+    where
+        F: Fn(ResourceRef<'_>, &ValueContext<'_>) -> ValueDecision + Send + Sync + 'static,
+    {
+        let permission = ResourcePermission {
+            validator: Arc::new(validator),
+        };
+        self.resource_permissions
+            .extend(uses.iter().map(|use_kind| (*use_kind, permission.clone())));
         self
+    }
+
+    /// Trusts all URLs and dynamic resource references for the named uses.
+    /// No URL scheme, origin, relative-reference, or destination check is made.
+    /// Prefer [`Self::allow_resources`] with an explicit validator for untrusted CSS.
+    /// This never enables `@import`.
+    pub fn dangerously_allow_unrestricted_resources(self, uses: &[ResourceUse]) -> Self {
+        self.allow_resources(uses, |_, _| ValueDecision::Allow)
     }
 
     pub fn allow_font_face_descriptors(mut self, descriptors: &[FontFaceDescriptorKind]) -> Self {
@@ -154,16 +192,27 @@ impl StrictPolicy {
         self
     }
 
-    pub fn allow_variables(mut self) -> Self {
-        self.allow_variables = true;
+    /// Allows CSS variables only in the named properties. This does not allow
+    /// the properties themselves or enable variables in descriptors.
+    /// Callers still trust the variables' external values in these properties;
+    /// do not include resource-capable properties without that trust.
+    pub fn allow_variables(mut self, properties: &[&str]) -> Self {
+        self.properties_allowing_variables
+            .extend(properties.iter().map(|name| canonical_property_name(name)));
         self
     }
 
-    pub fn allow_environment_variables(mut self) -> Self {
-        self.allow_environment_variables = true;
+    /// Trusts environment-variable substitutions only in the named properties.
+    /// This does not allow the properties themselves or enable descriptors.
+    /// Fallbacks are guarded, but external substituted values cannot be resolved.
+    pub fn allow_environment_variables(mut self, properties: &[&str]) -> Self {
+        self.properties_allowing_environment_variables
+            .extend(properties.iter().map(|name| canonical_property_name(name)));
         self
     }
 
+    /// Trusts the named generic functions, including values supplied by external
+    /// custom functions. Resource functions still require resource permission.
     pub fn allow_functions(mut self, functions: &[&str]) -> Self {
         self.allowed_functions
             .extend(functions.iter().map(|function| {
@@ -331,22 +380,33 @@ impl CssPolicy for StrictPolicy {
         }
     }
 
-    fn resource(&self, resource: ResourceRef<'_>, _context: &ValueContext<'_>) -> ValueDecision {
-        if self.allowed_resources.contains(&resource.use_kind) {
-            ValueDecision::Allow
-        } else {
-            ValueDecision::Deny
-        }
+    fn resource(&self, resource: ResourceRef<'_>, context: &ValueContext<'_>) -> ValueDecision {
+        self.resource_permissions
+            .get(&resource.use_kind)
+            .map_or(ValueDecision::Deny, |permission| {
+                (permission.validator)(resource, context)
+            })
     }
 
     fn dynamic_value(
         &self,
         value: DynamicValueRef<'_, '_>,
-        _context: &ValueContext<'_>,
+        context: &ValueContext<'_>,
     ) -> ValueDecision {
         match value.kind() {
-            DynamicValueKind::Variable if self.allow_variables => ValueDecision::Allow,
-            DynamicValueKind::EnvironmentVariable if self.allow_environment_variables => {
+            DynamicValueKind::Variable
+                if context.property.as_ref().is_some_and(|property| {
+                    self.properties_allowing_variables.contains(property.name())
+                }) =>
+            {
+                ValueDecision::Allow
+            }
+            DynamicValueKind::EnvironmentVariable
+                if context.property.as_ref().is_some_and(|property| {
+                    self.properties_allowing_environment_variables
+                        .contains(property.name())
+                }) =>
+            {
                 ValueDecision::Allow
             }
             DynamicValueKind::Function => {

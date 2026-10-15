@@ -256,15 +256,15 @@ pub enum ResourceUse {
 }
 
 impl ResourceUse {
-    pub fn from_value_context(ctx: &ValueContext<'_>) -> Self {
+    pub fn from_value_context(context: &ValueContext<'_>) -> Self {
         if matches!(
-            ctx.descriptor,
+            context.descriptor,
             Some(DescriptorKind::FontFace(FontFaceDescriptorKind::Source))
         ) {
             return Self::FontSource;
         }
 
-        let Some(property) = &ctx.property else {
+        let Some(property) = &context.property else {
             return Self::Other;
         };
         let name = property.name();

@@ -9,7 +9,7 @@ fn deeply_nested_resource_in_variable_fallback_is_denied() {
         "width: calc(1px + var(--x, calc(2px + var(--y, url('https://example.test/a.png')))))",
         &StrictPolicy::new()
             .allow_properties(&["width"])
-            .allow_variables(),
+            .allow_variables(&["width"]),
     );
     assert!(css.is_empty());
 }
@@ -39,12 +39,12 @@ fn var_and_env_permissions_are_distinct_from_generic_functions() {
 
     let variables = StrictPolicy::new()
         .allow_properties(&["width"])
-        .allow_variables();
+        .allow_variables(&["width"]);
     assert!(declaration_css("width: VAR(--size, 1px)", &variables).contains("VAR("));
 
     let environment = StrictPolicy::new()
         .allow_properties(&["width"])
-        .allow_environment_variables();
+        .allow_environment_variables(&["width"]);
     assert!(
         declaration_css("width: ENV(safe-area-inset-left, 1px)", &environment).contains("ENV(")
     );
@@ -58,7 +58,7 @@ fn unresolved_image_function_requires_both_dynamic_and_resource_permissions() {
         .allow_functions(&["--asset"]);
     assert!(declaration_css(input, &dynamic_only).is_empty());
 
-    let allowed = dynamic_only.allow_resources(&[ResourceUse::Image]);
+    let allowed = dynamic_only.dangerously_allow_unrestricted_resources(&[ResourceUse::Image]);
     assert!(declaration_css(input, &allowed).contains("--asset("));
 }
 
