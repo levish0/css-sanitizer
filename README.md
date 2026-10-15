@@ -1,6 +1,22 @@
+<div align="center">
+
 # css-sanitizer
 
 Policy-driven sanitization of untrusted CSS on top of [lightningcss](https://lightningcss.dev/).
+
+[![crates.io: css-sanitizer](https://img.shields.io/crates/v/css-sanitizer.svg?label=css-sanitizer)](https://crates.io/crates/css-sanitizer)
+[![Documentation](https://docs.rs/css-sanitizer/badge.svg)](https://docs.rs/css-sanitizer)
+[![Downloads](https://img.shields.io/crates/d/css-sanitizer.svg)](https://crates.io/crates/css-sanitizer)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Rust](https://img.shields.io/badge/rust-1.93.0+-orange.svg?logo=rust)](https://www.rust-lang.org/)
+
+[![Build](https://github.com/levish0/css-sanitizer/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/levish0/css-sanitizer/actions/workflows/build.yml)
+[![Check](https://github.com/levish0/css-sanitizer/actions/workflows/check.yml/badge.svg?branch=main)](https://github.com/levish0/css-sanitizer/actions/workflows/check.yml)
+[![Test](https://github.com/levish0/css-sanitizer/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/levish0/css-sanitizer/actions/workflows/test.yml)
+
+</div>
+
+---
 
 The crate deliberately stays close to the upstream AST. Custom policies receive
 `lightningcss::rules::CssRule`, `Property`, `SelectorList`, and descriptor types directly.
